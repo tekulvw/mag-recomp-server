@@ -18,6 +18,9 @@ pub struct Policy {
     /// Health a bot revival restores, as a share of the reviver's maximum.
     /// Bots own no skills, so this stands in for the resuscitation modifier.
     pub revive_health_per_mille: u16,
+    /// With `revive`, the nearest free bot medic walks to a downed teammate
+    /// within the downed-bot medic radius (bot_medic_approach).
+    pub approach_downed: bool,
 }
 impl Default for Policy {
     fn default() -> Self {
@@ -28,6 +31,7 @@ impl Default for Policy {
             medic_role_slots: vec![1],
             revive: true,
             revive_health_per_mille: 250,
+            approach_downed: true,
         }
     }
 }
@@ -97,7 +101,7 @@ pub(crate) fn medic_loadout(
     }
     kit
 }
-fn medkit_slot(
+pub(crate) fn medkit_slot(
     items: &item_catalog::ItemCatalog,
     team: TeamItem,
     kit: &replication::CharacterLoadout,
@@ -118,10 +122,11 @@ enum Patient {
     Bot(u16),
     Human(u16),
     Downed(u16),
+    DownedBot(u16),
 }
 fn key(patient: Patient) -> (u8, u16) {
     match patient {
-        Patient::Bot(id) => (0, id),
+        Patient::Bot(id) | Patient::DownedBot(id) => (0, id),
         Patient::Human(id) | Patient::Downed(id) => (1, id),
     }
 }
@@ -468,6 +473,17 @@ impl<W: Write> Engine<W> {
             let Some(r) = bot.target.runtime else {
                 continue;
             };
+            if revive && self.bot_revivable(id, now).is_some() {
+                candidates.push((
+                    bot.target.squad.team(),
+                    Candidate {
+                        patient: Patient::DownedBot(id),
+                        feet: r.physical_position(),
+                        share: 0,
+                    },
+                ));
+                continue;
+            }
             let healing_self =
                 bot.healing.generation == Some(r.generation) && bot.healing.effect.is_some();
             if bot.health > 0
@@ -639,6 +655,19 @@ impl<W: Write> Engine<W> {
                             treated.push(record);
                         }
                     }
+                    Patient::DownedBot(index) => {
+                        if let Some(record) = self.bot_revive_bot(
+                            id,
+                            squad,
+                            index,
+                            world,
+                            &policy,
+                            now,
+                            &mut messages,
+                        )? {
+                            treated.push(record);
+                        }
+                    }
                 }
             }
             // The user stands inside its own sphere and is treated as well.
@@ -770,6 +799,52 @@ impl<W: Write> Engine<W> {
         ))
     }
 
+    /// A bot medic revives a downed bot teammate, as a human medic does.
+    #[allow(clippy::too_many_arguments)]
+    fn bot_revive_bot(
+        &mut self,
+        healer: u16,
+        healer_squad: u16,
+        patient: u16,
+        world: u32,
+        policy: &Policy,
+        now: Duration,
+        messages: &mut Vec<OutboundMessage>,
+    ) -> Result<Option<Value>, &'static str> {
+        let Some(generation) = self.bot_revivable(patient, now) else {
+            return Ok(None);
+        };
+        let Some(damage) = self.plan_bot_revive_damage(
+            patient,
+            skill_catalog::OwnedModifiers::default().max_health_hp(),
+            f32::from(policy.revive_health_per_mille) / 1000.,
+        )?
+        else {
+            return Ok(None);
+        };
+        let patient_squad = self.bot_registry.bots[&patient].target.squad.squad_index();
+        let notice = protocol::RetailResuscitationNotification { healer, patient }.encode()?;
+        for member in self.active.iter().chain(self.peers.values()).filter(|a| {
+            a.reservation.world == world
+                && a.ready_for_updates
+                && a.initial_objects.is_some()
+                && [healer_squad, patient_squad].contains(&a.squad_catalog.squad_index())
+        }) {
+            messages.push(OutboundMessage {
+                reservation_id: member.reservation.id.clone(),
+                world_id: member.reservation.world,
+                player_id: member.reservation.player,
+                plugin_id: 1,
+                payload_hex: protocol::encode_hex(&notice),
+            });
+        }
+        self.commit_bot_revive(patient, generation, damage, now)?;
+        Ok(Some(
+            json!({"kind":"revived_bot","object_index":patient,"generation":generation,
+            "health_quarter_points":damage.health_quarter_points}),
+        ))
+    }
+
     pub(crate) fn tick_bot_healing(
         &mut self,
         now: Duration,
@@ -894,7 +969,7 @@ impl<W: Write> Engine<W> {
             }
             if let Some((resolved, packet)) = publication {
                 self.commit_bot_healing(id, generation, before, resolved, maximum)?;
-                self.broadcast_bot_state_packet(packet);
+                self.broadcast_bot_state_packet(id, packet);
             }
             self.bot_registry.bots.get_mut(&id).unwrap().healing = state;
         }

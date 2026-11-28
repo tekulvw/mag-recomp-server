@@ -89,6 +89,9 @@ object. Initial-load catalogs remain noninteractive. Source gameplay catalogs
 require the explicit concrete backend configuration described below.
 
 SecureHold supports activation, completion, retaking, cancellation and release.
+Destroyed burn-off and cooling towers are the exception: their completion is
+permanent and cannot be retaken
+([domination-permanent-completions.md](domination-permanent-completions.md)).
 Structural demolition preserves fuse priority and defuse back to Repaired after
 repair. Repair uses the objective's normalized health model, trusted actor/tool
 authority and native batch timing. Entering a state is separate from sequence,
@@ -250,7 +253,8 @@ synchronous START a player sends:
 
 - At a secure-and-hold point, the attacking side (not the point's owner)
   secures an open point and cancels a retake; the owning side retakes a
-  secured point and reverses an attacker's capture.
+  secured point (unless its completion is permanent) and reverses an
+  attacker's capture.
 - At a demolition structure, the attacking side arms a charge and the owner
   disarms one, under the structure's own rules.
 

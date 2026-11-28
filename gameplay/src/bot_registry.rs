@@ -36,6 +36,8 @@ pub struct BotPopulation {
     #[serde(default)]
     pub healing: crate::bot_healing::Policy,
     #[serde(default)]
+    pub incapacitation: crate::bot_incapacitation::Policy,
+    #[serde(default)]
     pub perception: crate::bot_perception::Policy,
     #[serde(default)]
     pub cover: crate::bot_cover::Policy,
@@ -95,6 +97,7 @@ impl BotPopulation {
         }
         self.firearms.validate()?;
         self.healing.validate()?;
+        self.incapacitation.validate()?;
         self.perception.validate()?;
         self.cover.validate()?;
         self.repair.validate()?;
@@ -130,6 +133,10 @@ impl BotPopulation {
         Ok(())
     }
 }
+/// The most bot snapshots one recipient is given in a batch. The next batch
+/// waits until this one has drained. Sixteen is about two replies' worth of
+/// whole snapshots under the per-recipient byte allowance.
+const BOT_SNAPSHOT_BATCH: usize = 16;
 #[derive(Default)]
 pub(crate) struct BotRegistry {
     pub(super) config: Option<BotPopulation>,
@@ -137,6 +144,10 @@ pub(crate) struct BotRegistry {
     pub(super) bots: BTreeMap<u16, WorldBot>,
     generations: BTreeMap<u16, u32>,
     known: BTreeMap<String, BTreeSet<u16>>,
+    /// Per recipient, the FIFO frame number (counted like
+    /// `shared_frames_drained`) through which its latest paced batch of bot
+    /// snapshots is queued. The next batch waits until that frame drains.
+    snapshot_batch_through: BTreeMap<String, u64>,
     pub(super) stats_publication: crate::bot_stat_publication::State,
     reservations: BTreeMap<u16, (crate::actor_collision::Reservation, Duration)>,
     last_wait_receipt: Option<Duration>,
@@ -226,6 +237,14 @@ pub(super) struct WorldBot {
     pub(super) resupply_planning_retry_at: Duration,
     pub(super) healing: crate::bot_healing::State,
     pub(super) received_healing: Option<crate::bot_healing::Received>,
+    /// Set while this life is downed (health 0, waiting for a medic).
+    pub(super) downed: Option<crate::bot_incapacitation::BotDowned>,
+    /// Revivals in this life; a later collapse is a new kill.
+    pub(super) revivals: u32,
+    /// The downed teammate this medic is walking to, if any.
+    pub(super) medic_approach: Option<crate::bot_medic_approach::Approach>,
+    /// The objective task a downed life had, resumed when it is revived.
+    pub(super) task_before_down: Option<crate::bot_objectives::Task>,
     /// The spawn point this life started at, when it used one.
     pub(super) life_spawn: Option<u16>,
     pub(super) move_attempted: bool,
@@ -1360,9 +1379,12 @@ impl<W: Write> Engine<W> {
         }
         .encode_with_profile(self.wire_profile)?;
         self.commit_bot_damage(id, generation, damage, now)?;
-        self.broadcast_bot_state_packet(packet);
+        self.broadcast_bot_state_packet(id, packet);
         Ok(())
     }
+    /// Commit terminal or ordinary damage to a living bot. Damage planned
+    /// with [`Self::plan_bot_damage`] commits its downed outcome through
+    /// [`Self::commit_planned_bot_damage`] instead.
     pub(crate) fn commit_bot_damage(
         &mut self,
         id: u16,
@@ -1370,17 +1392,55 @@ impl<W: Write> Engine<W> {
         damage: replication::CharacterDamage,
         now: Duration,
     ) -> Result<(), &'static str> {
+        self.commit_planned_bot_damage(id, generation, damage, None, now)
+    }
+    /// `downed` is the bot's downed state after this hit, as planned: `Some`
+    /// for a hit that downs it or a downed hit that does not finish it.
+    pub(crate) fn commit_planned_bot_damage(
+        &mut self,
+        id: u16,
+        generation: u32,
+        damage: replication::CharacterDamage,
+        downed: Option<incapacitation::Downed>,
+        now: Duration,
+    ) -> Result<(), &'static str> {
         if let Some(bot) = self.bot_registry.bots.get_mut(&id) {
             let mut runtime = bot.target.runtime.ok_or("bot_runtime_missing")?;
             if runtime.generation != generation
-                || bot.health == 0
+                || (bot.health == 0 && bot.downed.is_none())
                 || damage.health_quarter_points > bot.health
+                || (downed.is_some() != (damage.conditions & 2 != 0))
+                || (downed.is_some() && damage.health_quarter_points != 0)
             {
                 return Err("stale_bot_damage");
             }
+            if let Some(current) = bot.downed.as_mut() {
+                // Hits on a downed body only finish it or add to its budget.
+                bot.damage = damage;
+                match downed {
+                    Some(next) => current.state = next,
+                    None => {
+                        bot.downed = None;
+                        bot.task_before_down = None;
+                        runtime.since = now;
+                        runtime.last_update = now;
+                    }
+                }
+                bot.target.runtime = Some(runtime);
+                return Ok(());
+            }
+            let motion = runtime.physics_motion;
             bot.apply_damage_health(damage.health_quarter_points);
             bot.damage = damage;
             if bot.health == 0 {
+                bot.downed = downed.map(|state| {
+                    crate::bot_incapacitation::BotDowned::new(
+                        state,
+                        now,
+                        motion,
+                        &self.bot_registry.config,
+                    )
+                });
                 bot.firearm = Default::default();
                 bot.resupply = None;
                 bot.resupply_seek = None;
@@ -1392,7 +1452,9 @@ impl<W: Write> Engine<W> {
                 runtime.since = now;
                 runtime.last_update = now;
                 runtime.physics_motion = None;
-                bot.task = Default::default();
+                // A downed life resumes this task if it is revived.
+                let task = std::mem::take(&mut bot.task);
+                bot.task_before_down = bot.downed.is_some().then_some(task);
                 bot.delay_episode = None;
                 bot.reconsider = None;
                 bot.reconsider_history.clear();
@@ -1489,17 +1551,25 @@ impl<W: Write> Engine<W> {
             recipient.queue_state_shared(packet.clone());
         }
     }
-    /// A bot's own movement, life or removal, for the recipients that hold the
-    /// current bot snapshots (the set [`Self::tick_bots`] snapshots). Any other
-    /// recipient receives a fresh snapshot per bot once its FIFO drains, so these
-    /// deltas would only fill its bounded queue.
-    pub(super) fn broadcast_bot_state_packet(&mut self, packet: Vec<u8>) {
+    /// Bot `index`'s own movement, life or removal, for the recipients that
+    /// already hold its snapshot (see [`Self::tick_bots`]). A recipient still
+    /// waiting for that snapshot gets the bot's current state in it, so these
+    /// deltas would only fill its bounded queue, and would describe a Character
+    /// its client has not created yet.
+    pub(super) fn broadcast_bot_state_packet(&mut self, index: u16, packet: Vec<u8>) {
         let gate = self.shared_drain_gate();
+        let known = &self.bot_registry.known;
         for recipient in self
             .peers
             .values_mut()
             .chain(self.active.iter_mut())
-            .filter(|a| a.initial_objects.is_some() && gate.admits(a))
+            .filter(|a| {
+                a.initial_objects.is_some()
+                    && gate.admits(a)
+                    && known
+                        .get(&a.reservation.id)
+                        .is_some_and(|bots| bots.contains(&index))
+            })
         {
             recipient.queue_shared(packet.clone());
         }
@@ -1559,7 +1629,7 @@ impl<W: Write> Engine<W> {
                 player: index,
             }
             .encode_with_profile(self.wire_profile)?;
-            self.broadcast_bot_state_packet(packet);
+            self.broadcast_bot_state_packet(index, packet);
             for known in self.bot_registry.known.values_mut() {
                 known.remove(&index);
             }
@@ -1571,14 +1641,15 @@ impl<W: Write> Engine<W> {
     /// The wave deadline a dead bot's next life is due at, once reached.
     /// Once a dead life reaches its wave, the deadline is retained through an
     /// occupied spawn and the team's clock rollover.
-    fn due_bot_respawn(
+    pub(crate) fn due_bot_respawn(
         &self,
         id: u16,
         now: Duration,
         respawn_delays: [u32; 2],
     ) -> Result<Option<Duration>, &'static str> {
         let bot = &self.bot_registry.bots[&id];
-        if bot.health != 0 {
+        // A downed bot joins its wave only once it bleeds out or is finished.
+        if bot.health != 0 || bot.downed.is_some() {
             return Ok(None);
         }
         let runtime = bot.target.runtime.ok_or("bot_runtime_missing")?;
@@ -1670,12 +1741,43 @@ impl<W: Write> Engine<W> {
             .known
             .retain(|id, _| recipients.contains(id));
         self.bot_registry
+            .snapshot_batch_through
+            .retain(|id, _| recipients.contains(id));
+        self.bot_registry
             .stats_publication
             .retain_recipients(&recipients);
         for id in recipients {
+            let recipient = self
+                .active
+                .as_mut()
+                .filter(|a| a.reservation.id == id)
+                .or_else(|| self.peers.get_mut(&id))
+                .unwrap();
+            // Pace the snapshots a recipient still lacks. A reply carries only a
+            // few whole snapshots, and every snapshotted bot's deltas queue behind
+            // its snapshot at once. A joiner handed all 255 snapshots of a full
+            // world, with 255 bots publishing behind them, overflowed its bound
+            // within two seconds. Snapshots therefore go in batches, each queued
+            // once the previous one has drained.
             let known = self.bot_registry.known.entry(id.clone()).or_default();
+            let missing = self.bot_registry.bots.len().saturating_sub(known.len());
+            let batch_drained = self
+                .bot_registry
+                .snapshot_batch_through
+                .get(&id)
+                .is_none_or(|through| recipient.shared_frames_drained >= *through);
+            let room = if !batch_drained {
+                0
+            } else if missing <= BOT_SNAPSHOT_BATCH {
+                missing
+            } else {
+                recipient.bot_snapshot_room().min(BOT_SNAPSHOT_BATCH)
+            };
             let mut packets = Vec::new();
             for (&index, bot) in &self.bot_registry.bots {
+                if packets.len() >= room {
+                    break;
+                }
                 if !known.contains(&index) {
                     packets.push((
                         index,
@@ -1684,12 +1786,6 @@ impl<W: Write> Engine<W> {
                     ));
                 }
             }
-            let recipient = self
-                .active
-                .as_mut()
-                .filter(|a| a.reservation.id == id)
-                .or_else(|| self.peers.get_mut(&id))
-                .unwrap();
             for (index, allocation, packet) in packets {
                 let queued = recipient.pending_shared.len();
                 let through = recipient
@@ -1702,6 +1798,9 @@ impl<W: Write> Engine<W> {
                     self.bot_registry
                         .stats_publication
                         .register(&id, index, allocation, through);
+                    self.bot_registry
+                        .snapshot_batch_through
+                        .insert(id.clone(), through);
                 }
             }
         }
@@ -1813,6 +1912,10 @@ impl<W: Write> Engine<W> {
                 bot.resupply_planning_retry_at = Duration::ZERO;
                 bot.healing = Default::default();
                 bot.received_healing = None;
+                bot.downed = None;
+                bot.revivals = 0;
+                bot.medic_approach = None;
+                bot.task_before_down = None;
                 bot.life_spawn = spawn.spawn_point;
                 bot.damage = initial_damage();
                 bot.move_attempted = false;
@@ -1827,14 +1930,17 @@ impl<W: Write> Engine<W> {
                     bot.target.runtime.unwrap().physical_position(),
                     body,
                 )?;
-                packets.push(dummy::respawn_for(
+                packets.push((
                     id,
-                    2,
-                    now.as_millis() as u32,
-                    bot.target.position,
-                    &bot.target.loadout,
-                    self.wire_profile,
-                )?);
+                    dummy::respawn_for(
+                        id,
+                        2,
+                        now.as_millis() as u32,
+                        bot.target.position,
+                        &bot.target.loadout,
+                        self.wire_profile,
+                    )?,
+                ));
                 receipts.push(json!({"op":"bot_respawn","object_index":id,
                     "generation":runtime.generation,"spawn_point_index":spawn.spawn_point,
                     "arrival":spawn.arrival.code(),"position":spawn.position,
@@ -1967,7 +2073,7 @@ impl<W: Write> Engine<W> {
                         actors.remove(id);
                         self.bot_registry.reservations.remove(&id);
                     }
-                    packets.push(step.packet);
+                    packets.push((id, step.packet));
                     let status = step.receipt["navigation"]["status"].as_str();
                     let transition = status != bot.last_navigation_status.as_deref()
                         || bot.last_move_since != Some(runtime.since);
@@ -2087,7 +2193,7 @@ impl<W: Write> Engine<W> {
                     self.bot_registry.reservations.remove(&id);
                 }
                 if !step.packet.is_empty() {
-                    packets.push(step.packet);
+                    packets.push((id, step.packet));
                     receipts.push(step.receipt);
                 }
             }
@@ -2095,8 +2201,8 @@ impl<W: Write> Engine<W> {
         for receipt in receipts {
             self.record(receipt, wall)?;
         }
-        for packet in packets {
-            self.broadcast_bot_state_packet(packet);
+        for (id, packet) in packets {
+            self.broadcast_bot_state_packet(id, packet);
         }
         Ok(Vec::new())
     }
@@ -3728,6 +3834,10 @@ impl<W: Write> Engine<W> {
                     resupply_planning_retry_at: Duration::ZERO,
                     healing: Default::default(),
                     received_healing: None,
+                    downed: None,
+                    revivals: 0,
+                    medic_approach: None,
+                    task_before_down: None,
                     life_spawn: spawn.spawn_point,
                     move_attempted: false,
                     due_respawn_wave: None,
@@ -4303,6 +4413,14 @@ impl BotRegistry {
     /// The bots a recipient holds snapshots of, if it has been snapshotted.
     pub(crate) fn known_bots(&self, reservation_id: &str) -> Option<&BTreeSet<u16>> {
         self.known.get(reservation_id)
+    }
+    /// The population's fill total, for a test that adds a human.
+    pub(crate) fn set_total_for_test(&mut self, total: usize) {
+        self.total = total;
+    }
+    /// The bots a recipient holds snapshots of, for a test to set.
+    pub(crate) fn known_for_test(&mut self, reservation_id: &str) -> &mut BTreeSet<u16> {
+        self.known.entry(reservation_id.to_owned()).or_default()
     }
 }
 impl BotRegistry {

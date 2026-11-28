@@ -43,7 +43,9 @@ Selection is per objective and team: squads in order of their closest
 available member, then members by distance, with ties broken by squad and
 object index. At most `defender_cap` defenders and `attacker_cap` attackers
 join, and only bots within `reach_m`. Bots that are dead or servicing supply
-cannot join. A bot keeps its duty, and its ring place, for the rest of its
+cannot join, and neither can a bot holding an action on an objective that is
+not armed (planting a charge, taking a capture). Drafting it would cancel that
+action at once and flip its objective back to where it was. A bot keeps its duty, and its ring place, for the rest of its
 life or until the objective stops being armed. Places freed by a death are
 refilled. Ring places are spread by slot. A place whose ground is unsupported
 or unreachable is rotated to the next candidate.

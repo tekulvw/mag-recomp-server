@@ -32,8 +32,10 @@ impl<W: Write> Engine<W> {
                 self.refresh_bot_structure_obstacles(wall)
             )?;
             timed!(self, Phase::Perception, self.tick_bot_perception(now, wall))?;
-            self.wait_bot_cover_builds();
-            self.wait_bot_spawn_routes(wall)?;
+            timed!(self, Phase::SimWorkerWait, {
+                self.wait_bot_cover_builds();
+                self.wait_bot_spawn_routes(wall)
+            })?;
             timed!(self, Phase::Cover, self.tick_bot_cover(now, wall))?;
             messages.extend(timed!(self, Phase::Bots, self.tick_bots(now, wall))?);
             timed!(self, Phase::Waves, {
@@ -146,7 +148,12 @@ impl<W: Write> Engine<W> {
             let Some(clock) = self.team_waves[usize::from(team)] else {
                 continue;
             };
-            let deadline = clock.next_after(now)?;
+            // A queued character counts down to the wave it spawns on, which
+            // the respawn queue's cutoff can put one past the team's next wave.
+            let deadline = match actor.pending_spawn_deadline {
+                Some(deadline) => deadline,
+                None => clock.next_after(now)?,
+            };
             if actor.published_wave_deadline == Some(deadline) {
                 continue;
             }

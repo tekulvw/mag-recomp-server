@@ -527,7 +527,13 @@ impl<W: Write> Engine<W> {
                 .chain(self.peers.values())
                 .find(|a| a.reservation.id == *id)
         });
-        let dead = human.map_or(plan.expected.health == 0, |a| {
+        let downed_bot = human.is_none()
+            && self
+                .bot_registry
+                .bots
+                .get(&(target.character_id as u16))
+                .is_some_and(|bot| bot.downed.is_some());
+        let dead = human.map_or(plan.expected.health == 0 && !downed_bot, |a| {
             a.life.damage_health().is_none()
         });
         if dead {
@@ -554,7 +560,12 @@ impl<W: Write> Engine<W> {
                     .bots
                     .get(&(target.character_id as u16))
                     .ok_or("acquisition_character_missing")?;
-                armor::ArmorProfile::from_retail_loadout(&bot.target.loadout, catalog)?
+                let armor = armor::ArmorProfile::from_retail_loadout(&bot.target.loadout, catalog)?;
+                if downed_bot {
+                    armor.for_incapacitated(catalog)?
+                } else {
+                    armor
+                }
             };
             // No default FF tuning for a live world effect. Self source is
             // base1, and distinct resolved same-team attackers use bound rules.
@@ -609,6 +620,28 @@ impl<W: Write> Engine<W> {
                     last_source_object: source_object,
                     last_user_data: user_data,
                 };
+                if human.is_none() {
+                    // A bot's planned life uses the human representation:
+                    // downed, dead or alive after this hit.
+                    let id = target.character_id as u16;
+                    let (model, downed) = self.plan_bot_damage(id, amount, damage, now)?;
+                    damage = model;
+                    plan.life = Some(match downed {
+                        Some(downed) => CharacterLife::Incapacitated {
+                            generation: target.generation,
+                            downed,
+                        },
+                        None if damage.health_quarter_points == 0 => {
+                            CharacterLife::AwaitingRespawn {
+                                generation: target.generation,
+                            }
+                        }
+                        None => CharacterLife::Alive {
+                            generation: target.generation,
+                            health_quarter_points: damage.health_quarter_points,
+                        },
+                    });
+                }
                 if let Some(victim) = human {
                     let (model, life) = self.plan_human_damage(victim, amount, damage, now)?;
                     damage = model;
@@ -722,10 +755,14 @@ impl<W: Write> Engine<W> {
                         .retain(|hit| hit.target_character_id != plan.target.character_id);
                 }
             } else {
-                self.commit_bot_damage(
+                self.commit_planned_bot_damage(
                     plan.target.character_id as u16,
                     plan.target.generation,
                     damage,
+                    match plan.life {
+                        Some(CharacterLife::Incapacitated { downed, .. }) => Some(downed),
+                        _ => None,
+                    },
                     plan.now,
                 )?;
             }

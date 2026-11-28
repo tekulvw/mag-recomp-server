@@ -129,6 +129,10 @@ pub(crate) struct ObjectiveInteractionRule {
     /// Authored trigger boxes, one per linked trigger, for `authored_trigger_box`.
     #[serde(default)]
     pub(crate) trigger_volumes: Vec<crate::objective_range::TriggerBox>,
+    /// Set from the mode's authored sequence data, never from the catalog file:
+    /// a Completed point the owning side may not retake (it stays destroyed).
+    #[serde(skip)]
+    pub(crate) permanent_completion: bool,
 }
 /// Structural demolition timing and capability from authored retail properties.
 /// Score values remain configuration; this type alone does not apply score effects.
@@ -580,6 +584,50 @@ impl ObjectiveCatalog {
         self.objects
             .iter()
             .map(|object| (validated_token(&object.token), object.object_index))
+    }
+
+    /// Mark the secure-and-hold points (by objective token) whose completion is
+    /// permanent. Tokens of other classes are ignored; an unbound token is refused.
+    /// Returns the object indices marked.
+    pub(crate) fn mark_permanent_completions(
+        &mut self,
+        tokens: impl IntoIterator<Item = u32>,
+    ) -> Result<Vec<u16>, &'static str> {
+        let tokens: BTreeSet<u32> = tokens.into_iter().collect();
+        let known: BTreeSet<u32> = self
+            .objects
+            .iter()
+            .map(|object| validated_token(&object.token))
+            .collect();
+        if !tokens.is_subset(&known) {
+            return Err("unbound_permanent_completion_objective");
+        }
+        let mut marked = Vec::new();
+        for object in &mut self.objects {
+            let permanent = object.native_class == Some(NativeClass::SecureHold)
+                && tokens.contains(&validated_token(&object.token));
+            if let Some(rule) = &mut object.interaction {
+                rule.permanent_completion = permanent;
+                if permanent {
+                    marked.push(object.object_index);
+                }
+            }
+        }
+        Ok(marked)
+    }
+
+    /// Object indices currently marked as permanent once Completed.
+    pub(crate) fn permanent_completions(&self) -> Vec<u16> {
+        self.objects
+            .iter()
+            .filter(|object| {
+                object
+                    .interaction
+                    .as_ref()
+                    .is_some_and(|rule| rule.permanent_completion)
+            })
+            .map(|object| object.object_index)
+            .collect()
     }
 
     pub(crate) fn binding(&self, token: u32) -> Option<(u16, u8)> {

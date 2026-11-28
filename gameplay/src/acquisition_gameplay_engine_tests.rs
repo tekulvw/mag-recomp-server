@@ -1300,6 +1300,9 @@ mod vehicle_wave_effects;
 #[path = "acquisition_ability_spawn_tests.rs"]
 mod ability_spawn;
 
+#[path = "acquisition_order_refresh_tests.rs"]
+mod order_refresh;
+
 fn grenade_report(e: &Engine<Vec<u8>>, sequence: u32, position: CharacterPosition) -> Vec<u8> {
     grenade_report_for_slot(e, sequence, position, 0)
 }

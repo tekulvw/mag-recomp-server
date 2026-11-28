@@ -1,5 +1,11 @@
 #!/usr/bin/env python3
-"""Project the three original retail Domination hospital secondary rocket rules."""
+"""Project the three original retail hospital secondary rocket rules.
+
+The default mode binds them to Domination's hospital turret rules.
+``--mode acquisition`` binds the same three emplacement rockets to the
+Acquisition field-hospital turret rules from
+``project-retail-hospital-turrets.py --mode acquisition``.
+"""
 import argparse
 import math
 from pathlib import Path
@@ -17,6 +23,20 @@ sha, encode, parse, require, name_token = (
 SCRIPT_ROOT = HOSPITAL['SCRIPT_ROOT']
 TOKEN_OVERRIDE = SCRIPT_ROOT + 'tokenoverride.zpr'
 FIREPOINT = 'firepoint_02'
+
+# Each mode's rocket rules bind only that mode's hospital turret rules.
+MODES = {
+    'domination': {
+        'turrets': 'mag_domination_hospital_turrets_v1',
+        'rockets': 'mag_domination_hospital_rockets_v1',
+        'proof': 'mag_retail_domination_hospital_rocket_proof_v1',
+    },
+    'acquisition': {
+        'turrets': 'mag_acquisition_hospital_turrets_v1',
+        'rockets': 'mag_acquisition_hospital_rockets_v1',
+        'proof': 'mag_retail_acquisition_hospital_rocket_proof_v1',
+    },
+}
 
 FLIGHT_STRATEGIES = {
     'propulsion_strategy': ('propulsion_strategy', 'kWepPropulsionStrategyRocketStraight'),
@@ -198,7 +218,10 @@ def native_witness(elf):
 
 
 def project(hospital_raw, hospital_rules, hospital_proof, catalog_raw,
-            read_game, read_main, decode_model, native):
+            read_game, read_main, decode_model, native, mode='domination'):
+    schemas = MODES[mode]
+    require(hospital_rules['schema'] == schemas['turrets'],
+            f'{mode} rockets need {mode} hospital turret rules')
     require(hospital_raw == encode(hospital_rules),
             'supplied hospital turret rules differ from the six reproduced source profiles')
     catalog = parse(catalog_raw)
@@ -237,7 +260,7 @@ def project(hospital_raw, hospital_rules, hospital_proof, catalog_raw,
             'reference_nodes': references,
         })
     proof = {
-        'format': 'mag_retail_domination_hospital_rocket_proof_v1',
+        'format': schemas['proof'],
         'hospital_turrets_sha256': sha(hospital_raw),
         'hospital_turret_proof_sha256': sha(encode(hospital_proof)),
         'retail_archive_sha256': base['retail_archive_sha256'],
@@ -247,7 +270,7 @@ def project(hospital_raw, hospital_rules, hospital_proof, catalog_raw,
         'native': native, 'token_override': override, 'variants': sources,
     }
     rules = {
-        'schema': 'mag_domination_hospital_rockets_v1',
+        'schema': schemas['rockets'],
         'source': {
             'retail_elf_sha256': base['retail_elf_sha256'],
             'retail_archive_sha256': base['retail_archive_sha256'],
@@ -265,18 +288,26 @@ def project(hospital_raw, hospital_rules, hospital_proof, catalog_raw,
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    for name in ('elf', 'game-archive', 'main-archive', 'hospital-sources', 'hospital-turrets',
+    parser.add_argument('--mode', choices=tuple(MODES), default='domination')
+    for name in ('elf', 'game-archive', 'main-archive', 'hospital-turrets',
                  'item-catalog', 'item-bindings', 'structures', 'output', 'proof-output'):
         parser.add_argument('--' + name, type=Path, required=True)
+    parser.add_argument('--hospital-sources', type=Path, help='Domination hospital placer inputs')
     parser.add_argument('--profile', metavar=('SPAWNS', 'HOSPITALS'), type=Path, nargs=2,
-                        required=True, action='append', help='repeat once per Domination profile')
+                        required=True, action='append', help='repeat once per profile')
     parser.add_argument('--check', action='store_true')
     args = parser.parse_args()
-    inputs = [args.elf, args.game_archive, args.main_archive, args.hospital_sources,
+    domination = args.mode == 'domination'
+    if domination and args.hospital_sources is None:
+        parser.error('domination mode requires --hospital-sources')
+    if not domination and args.hospital_sources is not None:
+        parser.error('acquisition mode reads the hospital variants from the original archives')
+    inputs = [args.elf, args.game_archive, args.main_archive,
+              *([args.hospital_sources] if domination else []),
               args.hospital_turrets, args.item_catalog, args.item_bindings, args.structures,
               *(path for pair in args.profile for path in pair)]
     HOSPITAL['output_paths'](inputs, [args.output, args.proof_output])
-    require(len(args.profile) == 6, 'expected six Domination profile pairs')
+    require(len(args.profile) == 6, f'expected six {args.mode.capitalize()} profile pairs')
     elf = NATIVE['Elf'](args.elf, 'retail')
     game_raw, main_raw = args.game_archive.read_bytes(), args.main_archive.read_bytes()
     require(sha(game_raw) == HOSPITAL['GAME_ARCHIVE_SHA256']
@@ -292,18 +323,26 @@ def main():
 
     catalog = args.item_catalog.read_bytes()
     decode = HOSPITAL['read_model']
-    hospital_rules, hospital_proof = HOSPITAL['project'](
-        args.hospital_sources.read_bytes(), catalog, args.item_bindings.read_bytes(),
-        args.structures.read_bytes(), [(a.read_bytes(), b.read_bytes()) for a, b in args.profile],
-        read_game, read_main, decode, HOSPITAL['native_witness'](elf),
-    )
+    common = (catalog, args.item_bindings.read_bytes(), args.structures.read_bytes(),
+              [(a.read_bytes(), b.read_bytes()) for a, b in args.profile])
+    if domination:
+        hospital_rules, hospital_proof = HOSPITAL['project'](
+            args.hospital_sources.read_bytes(), *common,
+            read_game, read_main, decode, HOSPITAL['native_witness'](elf),
+        )
+    else:
+        hospital_rules, hospital_proof = HOSPITAL['project_acquisition'](
+            *common, read_game, read_main, decode,
+            HOSPITAL['body_locator'](main_archive), HOSPITAL['native_witness'](elf),
+        )
     rules, proof = project(
         args.hospital_turrets.read_bytes(), hospital_rules, hospital_proof, catalog,
-        read_game, read_main, decode, native_witness(elf),
+        read_game, read_main, decode, native_witness(elf), args.mode,
     )
     HOSPITAL['write_outputs'](inputs, [(args.output, encode(rules)), (args.proof_output, encode(proof))],
                               check=args.check)
-    print('Verified three original hospital rocket variants and six bound Domination profiles')
+    print('Verified three original hospital rocket variants and six bound '
+          f'{args.mode.capitalize()} profiles')
 
 
 if __name__ == '__main__':

@@ -61,6 +61,14 @@ fn die(engine: &mut Engine<Vec<u8>>) {
     actor.pending_spawn_deadline = None;
 }
 
+/// The dead character's first owner update once its queued wave is due.
+fn update_when_due(engine: &mut Engine<Vec<u8>>) {
+    let due = actor(engine)
+        .pending_spawn_deadline
+        .expect("the dead character is queued");
+    owner_update(engine, due.as_millis() as u64 + 10);
+}
+
 fn assert_alive_at(engine: &Engine<Vec<u8>>, generation: u32, position: [f32; 3]) {
     let actor = actor(engine);
     assert!(
@@ -121,7 +129,7 @@ fn a_selection_made_while_alive_applies_to_the_next_life() {
     assert!(actor(&engine).life.is_alive());
     die(&mut engine);
     owner_update(&mut engine, 220);
-    owner_update(&mut engine, 300);
+    update_when_due(&mut engine);
     assert_alive_at(&engine, 2, POINT_0);
 }
 
@@ -151,7 +159,7 @@ fn leaving_the_queue_holds_the_dead_player_until_it_confirms_again() {
     // The hold belonged to that death only.
     die(&mut engine);
     owner_update(&mut engine, 620);
-    owner_update(&mut engine, 700);
+    update_when_due(&mut engine);
     assert_alive_at(&engine, 3, POINT_0);
 }
 
@@ -177,7 +185,7 @@ fn a_squad_change_resets_the_stored_selection_to_the_new_squads_spawn() {
     assert_eq!(actor(&engine).squad_catalog.squad_index(), 1);
     assert!(actor(&engine).selected_spawn.is_none());
     owner_update(&mut engine, 220);
-    owner_update(&mut engine, 300);
+    update_when_due(&mut engine);
     assert_alive_at(&engine, 2, POINT_0);
 }
 
@@ -189,7 +197,7 @@ fn an_unusable_stored_selection_falls_back_to_the_squads_point_and_is_dropped() 
         .unwrap();
     die(&mut engine);
     owner_update(&mut engine, 220);
-    owner_update(&mut engine, 300);
+    update_when_due(&mut engine);
     assert_alive_at(&engine, 2, POINT_0);
     assert!(actor(&engine).selected_spawn.is_none());
 }
@@ -213,20 +221,21 @@ fn world_tick(engine: &mut Engine<Vec<u8>>, now_ms: u64) {
     assert!(response.ok, "{:?}", response.error);
 }
 
-fn next_wave(engine: &Engine<Vec<u8>>, now_ms: u64) -> Duration {
+/// The wave a character that dies at `now_ms` rejoins by itself.
+fn wave_after_death(engine: &Engine<Vec<u8>>, now_ms: u64) -> Duration {
     engine.team_waves[usize::from(actor(engine).team())]
         .expect("the first life started the team clock")
-        .next_after(Duration::from_millis(now_ms))
+        .wave_after_death(Duration::from_millis(now_ms))
         .unwrap()
 }
 
 #[test]
-fn a_death_just_before_a_wave_spawns_on_that_wave_without_waiting_for_an_owner_update() {
+fn a_death_spawns_on_its_wave_without_waiting_for_an_owner_update() {
     let mut engine = engine_with_first_life();
     engine.enable_world_ticks();
     die(&mut engine);
     let died_ms = 210;
-    let wave = next_wave(&engine, died_ms);
+    let wave = wave_after_death(&engine, died_ms + 10);
     // The world tick that first sees the death queues it for that wave.
     world_tick(&mut engine, died_ms + 10);
     assert_eq!(actor(&engine).pending_spawn_deadline, Some(wave));
@@ -266,4 +275,181 @@ fn the_world_tick_does_not_queue_once_the_match_has_ended() {
     });
     let _ = engine.tick_world(Duration::from_millis(220), 1, "synthetic-tick".into());
     assert!(actor(&engine).pending_spawn_deadline.is_none());
+}
+
+// Respawn queue cutoff: a dead character that rejoins by itself never takes a
+// wave within `RESPAWN_QUEUE_CUTOFF` (3.5 s) of joining, because its client is
+// still playing the death; a confirmation from its open respawn screen does.
+
+/// A first life at point 1, world ticks on, then team waves at 1 s, 21 s, ...
+fn alive_with_twenty_second_waves() -> Engine<Vec<u8>> {
+    let mut engine = engine_with_first_life();
+    engine.enable_world_ticks();
+    let team = usize::from(actor(&engine).team());
+    engine.team_waves[team] = Some(TeamWaveClock {
+        first_deadline: Duration::from_millis(1000),
+        period: Duration::from_secs(20),
+    });
+    engine
+}
+
+fn kill_self(engine: &mut Engine<Vec<u8>>, now_ms: u64) {
+    let player = actor(engine).reservation.player;
+    dispatch(
+        engine,
+        &crate::admin_kill::kill_self_payload(player),
+        now_ms,
+    )
+    .unwrap();
+    assert!(
+        matches!(actor(engine).life, CharacterLife::AwaitingRespawn { .. }),
+        "{:?}",
+        actor(engine).life
+    );
+}
+
+fn assert_dead(engine: &Engine<Vec<u8>>) {
+    assert!(
+        matches!(actor(engine).life, CharacterLife::AwaitingRespawn { .. }),
+        "{:?}",
+        actor(engine).life
+    );
+}
+
+#[test]
+fn a_kill_just_before_a_wave_skips_it_and_counts_down_to_the_following_wave() {
+    // The live case: killed 350 ms before the wave, spawned on it without
+    // a respawn screen, and the client never recovered.
+    let mut engine = alive_with_twenty_second_waves();
+    die(&mut engine);
+    world_tick(&mut engine, 650);
+    let actor_now = actor(&engine);
+    assert_eq!(
+        actor_now.pending_spawn_deadline,
+        Some(Duration::from_secs(21))
+    );
+    assert_eq!(
+        actor_now.published_wave_deadline,
+        Some(Duration::from_secs(21)),
+        "the countdown shows the wave it spawns on"
+    );
+    owner_update(&mut engine, 1050);
+    assert_dead(&engine);
+    // The world tick's rollover publication keeps the queued wave.
+    world_tick(&mut engine, 1100);
+    assert_eq!(
+        actor(&engine).published_wave_deadline,
+        Some(Duration::from_secs(21))
+    );
+    owner_update(&mut engine, 21_030);
+    assert_alive_at(&engine, 2, POINT_1);
+}
+
+#[test]
+fn a_self_kill_just_before_a_wave_skips_it() {
+    let mut engine = alive_with_twenty_second_waves();
+    kill_self(&mut engine, 18_000);
+    world_tick(&mut engine, 18_010);
+    assert_eq!(
+        actor(&engine).pending_spawn_deadline,
+        Some(Duration::from_secs(41)),
+        "the wave at 21 s is 2.99 s away"
+    );
+    owner_update(&mut engine, 21_030);
+    assert_dead(&engine);
+    owner_update(&mut engine, 41_030);
+    assert_alive_at(&engine, 2, POINT_1);
+}
+
+#[test]
+fn a_death_further_from_the_wave_than_the_cutoff_still_takes_it() {
+    let mut engine = alive_with_twenty_second_waves();
+    kill_self(&mut engine, 17_000);
+    world_tick(&mut engine, 17_010);
+    assert_eq!(
+        actor(&engine).pending_spawn_deadline,
+        Some(Duration::from_secs(21))
+    );
+    owner_update(&mut engine, 21_030);
+    assert_alive_at(&engine, 2, POINT_1);
+}
+
+#[test]
+fn without_world_ticks_the_owner_update_requeue_applies_the_same_cutoff() {
+    let mut engine = engine_with_first_life();
+    let team = usize::from(actor(&engine).team());
+    engine.team_waves[team] = Some(TeamWaveClock {
+        first_deadline: Duration::from_millis(1000),
+        period: Duration::from_secs(20),
+    });
+    die(&mut engine);
+    owner_update(&mut engine, 700);
+    assert_eq!(
+        actor(&engine).pending_spawn_deadline,
+        Some(Duration::from_secs(21))
+    );
+    owner_update(&mut engine, 1050);
+    assert_dead(&engine);
+}
+
+#[test]
+fn a_confirmation_from_the_respawn_screen_takes_the_next_wave_again() {
+    // Retail queues a dead character only on its client's confirmation, and
+    // any confirmation before a wave takes that wave. Once the respawn
+    // screen is open the cutoff no longer applies.
+    let mut engine = alive_with_twenty_second_waves();
+    kill_self(&mut engine, 17_600);
+    world_tick(&mut engine, 17_610);
+    assert_eq!(
+        actor(&engine).pending_spawn_deadline,
+        Some(Duration::from_secs(41))
+    );
+    // The client's respawn screen opens 2.5 s later and confirms by itself.
+    select(&mut engine, 1, 20_200);
+    confirm(&mut engine, 20_200);
+    assert_eq!(
+        actor(&engine).pending_spawn_deadline,
+        Some(Duration::from_secs(21))
+    );
+    assert_eq!(
+        actor(&engine).published_wave_deadline,
+        Some(Duration::from_secs(21))
+    );
+    owner_update(&mut engine, 21_030);
+    assert_alive_at(&engine, 2, POINT_1);
+}
+
+#[test]
+fn a_repeated_confirmation_never_moves_a_queued_spawn_later() {
+    let mut engine = alive_with_twenty_second_waves();
+    kill_self(&mut engine, 10_000);
+    world_tick(&mut engine, 10_010);
+    assert_eq!(
+        actor(&engine).pending_spawn_deadline,
+        Some(Duration::from_secs(21))
+    );
+    for now in [12_600, 20_900] {
+        confirm(&mut engine, now);
+        assert_eq!(
+            actor(&engine).pending_spawn_deadline,
+            Some(Duration::from_secs(21))
+        );
+    }
+}
+
+#[test]
+fn every_later_death_waits_for_the_cutoff_too() {
+    // A client that never confirms (as a client stuck by an early life does)
+    // still waits past the cutoff after each death.
+    let mut engine = alive_with_twenty_second_waves();
+    for (generation, died_ms, due_ms) in [(2, 18_500, 41_000), (3, 59_000, 81_000)] {
+        kill_self(&mut engine, died_ms);
+        world_tick(&mut engine, died_ms + 10);
+        assert_eq!(
+            actor(&engine).pending_spawn_deadline,
+            Some(Duration::from_millis(due_ms))
+        );
+        owner_update(&mut engine, due_ms + 30);
+        assert_alive_at(&engine, generation, POINT_1);
+    }
 }

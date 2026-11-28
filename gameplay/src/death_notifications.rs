@@ -206,10 +206,13 @@ impl<W: Write> Engine<W> {
 
     /// Caller must record Plan::audit before invoking this method. Existing
     /// human/bot terminal guards are the authority for exactly-once publication.
+    /// `downed` is a bot victim's planned downed state (see
+    /// `plan_bot_damage`); a human victim's life is committed separately.
     pub(super) fn commit_weapon_death(
         &mut self,
         plan: Plan,
         damage: replication::CharacterDamage,
+        downed: Option<incapacitation::Downed>,
         now: Duration,
     ) -> Result<(), &'static str> {
         if damage.health_quarter_points != 0
@@ -233,7 +236,13 @@ impl<W: Write> Engine<W> {
                 .ok_or("stale_firearm_death")?;
             victim.apply_peer_damage(plan.victim.generation, damage, now)?;
         } else {
-            self.commit_bot_damage(plan.victim.id, plan.victim.generation, damage, now)?;
+            self.commit_planned_bot_damage(
+                plan.victim.id,
+                plan.victim.generation,
+                damage,
+                downed,
+                now,
+            )?;
         }
         // Current human members of the union of the two actual squads. Iterating
         // actual sessions once deduplicates identical squads and excludes bots.
@@ -394,6 +403,31 @@ impl<W: Write> Engine<W> {
             source_type: 2,
             source_index: i32::from(source.item as i16),
             location,
+            mounted: protocol::VictimWasMounted::NoAssociatedVehicle,
+        })
+    }
+
+    /// A ground vehicle hit an on-foot character. Retail names its Vehicle
+    /// source type and the vehicle's object ID as the source index, and
+    /// credits the driver.
+    pub(super) fn plan_vehicle_impact_death_notice(
+        &self,
+        world: u32,
+        victim: u16,
+        driver: u32,
+        vehicle_object_id: u32,
+        source_type: u8,
+    ) -> Result<CharacterEffectNotice, &'static str> {
+        if self.wire_profile.application_id() != 20231 || source_type != 3 {
+            return Err("unsupported_vehicle_impact_death_source");
+        }
+        self.character_effect_notice(CharacterEffectNoticeRequest {
+            world,
+            victim,
+            attacker: driver,
+            source_type: u32::from(source_type),
+            source_index: vehicle_object_id as i32,
+            location: 0,
             mounted: protocol::VictimWasMounted::NoAssociatedVehicle,
         })
     }

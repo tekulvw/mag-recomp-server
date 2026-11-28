@@ -118,6 +118,7 @@ impl<W: Write> Engine<W> {
                 due.push((victim.reservation.id.clone(), generation, damage, packet));
             }
         }
+        self.tick_bot_incapacitation(now, wall)?;
         if due.is_empty() {
             return Ok(());
         }
@@ -183,7 +184,6 @@ impl Active {
         self.healing = None;
         self.pending_damage = None;
         self.pending_spawn_deadline = None;
-        self.respawn_screen_ready_at = None;
         self.published_wave_deadline = None;
         self.last_exit = None;
         // No forced field4, spawn trigger, inventory reset or generation change.

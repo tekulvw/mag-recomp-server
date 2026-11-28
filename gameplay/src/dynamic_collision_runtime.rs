@@ -392,7 +392,7 @@ impl<W: Write> Engine<W> {
                 runtime.generation,
                 bot.target.squad.team(),
                 runtime.physical_position(),
-                bot.health == 0,
+                bot.health == 0 && bot.downed.is_none(),
             )?;
         }
         if let Some(vehicles) = &self.ground_vehicles {

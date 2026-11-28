@@ -301,7 +301,6 @@ impl<W: Write> Engine<W> {
             self.match_terminal = Some(notice);
             for actor in self.peers.values_mut().chain(self.active.iter_mut()) {
                 actor.pending_spawn_deadline = None;
-                actor.respawn_screen_ready_at = None;
             }
         }
         self.round = next;

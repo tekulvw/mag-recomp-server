@@ -8,6 +8,9 @@ pub struct Rules {
     pub owner_team: u8,
     pub trigger_count: u8,
     pub can_deactivate: bool,
+    /// False when a Completed point is permanent: the owner may still reverse
+    /// an attacker's hold before completion, but never retake the result.
+    pub can_retake: bool,
     pub activate_ms: u32,
     pub complete_ms: u32,
     pub deactivate_ms: u32,
@@ -172,6 +175,8 @@ impl SecureHold {
                 }
                 if self.current == Activated {
                     Deactivating
+                } else if !self.rules.can_retake {
+                    return Err("secure_hold_completion_permanent");
                 } else {
                     Retaking
                 }
@@ -320,6 +325,7 @@ mod tests {
             owner_team: 1,
             trigger_count: 2,
             can_deactivate: true,
+            can_retake: true,
             activate_ms: 100,
             complete_ms: 250,
             deactivate_ms: 70,
@@ -464,5 +470,32 @@ mod tests {
             world.request(Action::Deactivate, DEFENDER, 0, true),
             Err("secure_hold_deactivation_disabled")
         );
+    }
+
+    #[test]
+    fn permanent_completion_refuses_retake_but_keeps_window_defence() {
+        let rules = Rules {
+            can_retake: false,
+            ..rules()
+        };
+        let mut world = SecureHold::new(Deactivated, rules).unwrap();
+        let activate = world.request(Action::Activate, ATTACKER, 0, true).unwrap();
+        world.commit(activate, 0, None).unwrap();
+        assert_eq!(due(&mut world, 100).current, Activated);
+        // Inside the completion window the owner may still reverse the hold.
+        let defend = world
+            .request(Action::Deactivate, DEFENDER, 0, true)
+            .unwrap();
+        assert_eq!(defend.target(), Deactivating);
+        world.commit(defend, 120, None).unwrap();
+        assert_eq!(due(&mut world, 190).current, Deactivated);
+
+        let mut world = SecureHold::new(Completed, rules).unwrap();
+        assert_eq!(
+            world.request(Action::Deactivate, DEFENDER, 0, true),
+            Err("secure_hold_completion_permanent")
+        );
+        assert_eq!(world.current(), Completed);
+        assert_eq!(world.due(10_000, |_| true), None);
     }
 }

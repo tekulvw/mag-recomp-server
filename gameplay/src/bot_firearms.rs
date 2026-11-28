@@ -1114,6 +1114,16 @@ impl<W: Write> Engine<W> {
                 }
                 if hit && let Some(mut damage) = resolved {
                     let mut human_life = None;
+                    let mut bot_downed = None;
+                    if target.life.reservation.is_none() {
+                        let (model, downed) =
+                            self.plan_bot_damage(target.life.id, amount, damage, now)?;
+                        damage = model;
+                        bot_downed = downed;
+                        if downed.is_some() {
+                            receipts[shot_receipt]["target_downed"] = json!(true);
+                        }
+                    }
                     if let Some(reservation) = &target.life.reservation {
                         let victim = self
                             .active
@@ -1179,7 +1189,7 @@ impl<W: Write> Engine<W> {
                             damage.health_quarter_points == 0,
                         )
                         .encode_with_profile(self.wire_profile)?;
-                    pending_damage = Some((target, damage, human_life, packet));
+                    pending_damage = Some((target, damage, human_life, bot_downed, packet));
                 }
             }
             let fields = player_tracking::ClientCharacterFields {
@@ -1209,46 +1219,53 @@ impl<W: Write> Engine<W> {
             for receipt in receipts {
                 self.record(receipt, wall)?;
             }
-            let damage_packet = if let Some((target, damage, human_life, packet)) = pending_damage {
-                if let Some(reservation) = &target.life.reservation {
-                    if let Some(plan) = death_notification.take() {
-                        self.commit_weapon_death(plan, damage, now)?;
+            let damage_packet =
+                if let Some((target, damage, human_life, bot_downed, packet)) = pending_damage {
+                    if let Some(reservation) = &target.life.reservation {
+                        if let Some(plan) = death_notification.take() {
+                            self.commit_weapon_death(plan, damage, None, now)?;
+                        } else {
+                            let victim = self
+                                .active
+                                .as_mut()
+                                .filter(|a| a.reservation.id == *reservation)
+                                .or_else(|| self.peers.get_mut(reservation))
+                                .ok_or("stale_bot_firearm_target")?;
+                            victim.apply_peer_damage(target.life.generation, damage, now)?;
+                        }
+                        if let Some(life) = human_life {
+                            let victim = self
+                                .active
+                                .as_mut()
+                                .filter(|a| a.reservation.id == *reservation)
+                                .or_else(|| self.peers.get_mut(reservation))
+                                .ok_or("stale_bot_firearm_target")?;
+                            victim.life = life;
+                        }
+                    } else if let Some(plan) = death_notification.take() {
+                        self.commit_weapon_death(plan, damage, bot_downed, now)?;
                     } else {
-                        let victim = self
-                            .active
-                            .as_mut()
-                            .filter(|a| a.reservation.id == *reservation)
-                            .or_else(|| self.peers.get_mut(reservation))
-                            .ok_or("stale_bot_firearm_target")?;
-                        victim.apply_peer_damage(target.life.generation, damage, now)?;
+                        self.commit_planned_bot_damage(
+                            target.life.id,
+                            target.life.generation,
+                            damage,
+                            bot_downed,
+                            now,
+                        )?;
                     }
-                    if let Some(life) = human_life {
-                        let victim = self
-                            .active
-                            .as_mut()
-                            .filter(|a| a.reservation.id == *reservation)
-                            .or_else(|| self.peers.get_mut(reservation))
-                            .ok_or("stale_bot_firearm_target")?;
-                        victim.life = life;
+                    if let Some(kd) = bot_kd {
+                        kd.install(self)?;
                     }
-                } else if let Some(plan) = death_notification.take() {
-                    self.commit_weapon_death(plan, damage, now)?;
+                    if let Some(death) = human_death {
+                        messages.extend(death.install(self)?);
+                    }
+                    if let Some(actor) = actors.iter_mut().find(|a| a.life == target.life) {
+                        actor.health = damage.health_quarter_points;
+                    }
+                    Some(packet)
                 } else {
-                    self.commit_bot_damage(target.life.id, target.life.generation, damage, now)?;
-                }
-                if let Some(kd) = bot_kd {
-                    kd.install(self)?;
-                }
-                if let Some(death) = human_death {
-                    messages.extend(death.install(self)?);
-                }
-                if let Some(actor) = actors.iter_mut().find(|a| a.life == target.life) {
-                    actor.health = damage.health_quarter_points;
-                }
-                Some(packet)
-            } else {
-                None
-            };
+                    None
+                };
             if let Some(assists) = firearm_assists {
                 assists.install(self)?;
             }
@@ -1288,7 +1305,7 @@ impl<W: Write> Engine<W> {
             }
             // The shooter's own pose follows its snapshot; damage can be to a human.
             if let Some(packet) = owner_packet {
-                self.broadcast_bot_state_packet(packet);
+                self.broadcast_bot_state_packet(id, packet);
             }
             if let Some(packet) = damage_packet {
                 self.broadcast_bot_packet(packet);

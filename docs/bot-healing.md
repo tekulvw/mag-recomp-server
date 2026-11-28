@@ -31,12 +31,54 @@ sphere in the retail combat catalog (the medkit). Its sphere sits
     healed, receives the item's healing effect, built with the human
     healing rules (`received_bot_healing_tick` for bots; a human's own
     healing ticks for humans);
-  - a downed human teammate is revived when `revive` is on and the match
-    has incapacitation rules.
+  - a downed human or bot teammate is revived when `revive` is on and the
+    match has incapacitation rules.
 - **Combat:** a medic whose weapon holds an enemy only uses the item for a
   teammate at or below 40% health or downed.
 - **Cooldown:** one use starts the item's authored cooldown, and each patient
   is treated by at most one medic per tick. Enemies are never treated.
+
+### Reaching downed teammates
+
+When `approach_downed` and `revive` are on, every downed teammate, human or
+bot, that a medic can still revive gets one bot medic sent to it: the nearest
+free medic of its side within the downed-bot medic radius
+(`incapacitation.medic_radius_m`, 30 m, straight-line; see "Downed bots" in
+[incapacitation.md](incapacitation.md)). Free means alive, not downed,
+grounded and not on another job.
+
+- **Priority:** the medic leaves its ordinary objective movement and its
+  cover. It is never taken from a higher duty: an armed-objective, blast or
+  defuse duty, a repair or demolition duty, an objective interaction, a
+  supply action or a passage. When one of those comes up, it drops the
+  approach.
+- **One medic per patient:** a medic serves one patient, and a patient has
+  one medic. At most four new routes start per tick, nearest pairs first.
+- **Only walkable approaches:** a medic is sent only when it stands on the
+  patient's navmesh walking component and the planned route takes no
+  passage (it holds no permit, so it would stop there) and is at most twice
+  the radius long. Otherwise that medic is not sent to that patient again
+  during the patient's downed life.
+- **Walk and revive:** the medic walks the navmesh to the patient and stops
+  once the patient is well inside its medkit's sphere. The ordinary medkit
+  use above then revives the patient.
+- **Resuming:** the medic keeps its objective task through the approach and
+  resumes it afterwards, and a revived bot resumes the task it had when it
+  went down: both keep their destination and only plan the route there
+  again.
+- **Release:** the approach ends, and the medic returns to its objective,
+  when the patient is revived or bleeds out, when the medic dies or goes
+  down, when it takes a higher duty, or when it gets no closer for 6 s. After
+  that last case the same medic is not sent to the same patient again during
+  that downed life.
+
+The downed bot's own wait is unchanged: it still checks for a medic within
+30 m at 10 s and every second after, and a medic on its way counts.
+
+Receipts: `bot_medic_approach_started`, `bot_medic_approach_arrived`,
+`bot_medic_approach_ended` (with `reason`: `patient_revived`,
+`patient_lost`, `medic_down`, `higher_duty`, `supply_action`, `passage`,
+`no_progress` or `disabled`) and `bot_medic_approach_unroutable`.
 
 ### Revival
 
@@ -60,7 +102,8 @@ The population file's `healing` object; omitted fields use the defaults:
   "teammates": true,
   "medic_role_slots": [1],
   "revive": true,
-  "revive_health_per_mille": 250
+  "revive_health_per_mille": 250,
+  "approach_downed": true
 }
 ```
 
@@ -71,7 +114,7 @@ default kit and self-healing only.
 
 `bot_teammate_healing_started` records the medic, item, sphere centre and
 radius, whether it was fighting, whether it treated itself, and each patient
-(`bot`, `human` or `revived`, with health before).
+(`bot`, `human`, or `revived` or `revived_bot` with the restored health).
 
 Headless bot-only runs, with private inputs and deterministic:
 
@@ -89,4 +132,4 @@ no human teammates.
 
 - Medics do not walk to injured teammates. They treat whoever is within
   reach of their sphere, typically squadmates sharing an objective position.
-- Bots are never downed, so only humans are revived.
+  Only downed teammates bring a medic over (above).

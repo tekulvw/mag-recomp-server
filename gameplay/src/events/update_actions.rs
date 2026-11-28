@@ -19,7 +19,15 @@ pub(super) fn plan_pending_damage<W: Write>(
             && (0x03800000 | u32::from(b.object_index)) == pending.target_character_id
             && pending.target_reservation_id.is_none()
             && b.generation == pending.generation
-            && b.health_quarter_points > 0
+            && (b.health_quarter_points > 0
+                || ctx.engine.bot_revivable(b.object_index, now).is_some())
+    });
+    let downed_bot = registry_target.and_then(|b| {
+        ctx.engine
+            .bot_registry
+            .bots
+            .get(&b.object_index)
+            .and_then(|bot| bot.downed)
     });
     let human_target = ctx
         .engine
@@ -55,6 +63,7 @@ pub(super) fn plan_pending_damage<W: Write>(
                             bot.allocation_generation == allocation
                                 && bot.target.runtime.is_some_and(|runtime| {
                                     !matches!(runtime.phase, development_target::BotPhase::Dead)
+                                        || bot.downed.is_some()
                                 })
                         })
                     }
@@ -134,6 +143,43 @@ pub(super) fn plan_pending_damage<W: Write>(
             pending.damage.apply(health_quarter_points)?
         };
         let mut human_life = None;
+        let mut bot_downed = None;
+        if let Some(bot) = registry_target {
+            let (model, downed) = ctx.engine.plan_bot_damage(
+                bot.object_index,
+                pending.damage.amount_hp,
+                resolved,
+                now,
+            )?;
+            resolved = model;
+            bot_downed = downed;
+            if downed_bot.is_some_and(|d| !d.state.is_expired(now))
+                && downed.is_none()
+                && let Some(killer) = ctx
+                    .engine
+                    .active
+                    .iter()
+                    .chain(ctx.engine.peers.values())
+                    .find(|a| {
+                        pending.damage.attacker_id
+                            == (0x0380_0000 | u32::from(a.reservation.player))
+                    })
+            {
+                statistics::finished(plan, killer, bot.team);
+                if killer.team() != bot.team
+                    && let Some(recipient) = progression::RewardRecipient::from_active(killer)
+                {
+                    plan.combat.new_rewards.push(recipient.event(
+                        format!(
+                            "finish-{}-bot-{:04x}-{:08x}-{}",
+                            killer.reservation.id, bot.object_index, bot.generation, pending.id
+                        ),
+                        progression::RewardKind::EnemyFinished,
+                        1,
+                    ));
+                }
+            }
+        }
         if let Some(victim) = human_target {
             let (model, life) =
                 ctx.engine
@@ -236,6 +282,8 @@ pub(super) fn plan_pending_damage<W: Write>(
                     .push((peer.reservation.id.clone(), life));
             }
         } else if let Some(bot) = registry_target {
+            // The initial collapse owns the kill; finishing adds none.
+            let lethal = lethal && health_quarter_points > 0;
             if qualified_frag && lethal && ctx.engine.match_terminal.is_none() {
                 plan.combat.bot_firearm_kd = Some(bot_firearm_kd::Plan::prepare(
                     ctx.engine,
@@ -251,7 +299,7 @@ pub(super) fn plan_pending_damage<W: Write>(
             }
             plan.combat
                 .bot_damage
-                .push((bot.object_index, bot.generation, resolved));
+                .push((bot.object_index, bot.generation, resolved, bot_downed));
             // Grenade damage stays on its launcher's authenticated queue, even
             // after that launcher dies. Require its full attacker handle rather
             // than crediting whichever actor happens to dispatch an event.
@@ -264,7 +312,11 @@ pub(super) fn plan_pending_damage<W: Write>(
                     && let Some(recipient) = progression::RewardRecipient::from_active(active)
                 {
                     let reward = ctx.engine.frago_combat_reward(
-                        recipient.bot_killed(bot.object_index, bot.generation),
+                        recipient.bot_killed_collapse(
+                            bot.object_index,
+                            bot.generation,
+                            ctx.engine.bot_revivals(bot.object_index),
+                        ),
                         active,
                         Some(crate::frago::point(bot.position)),
                         plan.frago_frame(ctx.engine),

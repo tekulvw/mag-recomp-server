@@ -339,7 +339,7 @@ fn objectives(can_deactivate: bool) -> ObjectiveCatalog {
 }
 
 /// A 120 m generated floor and navmesh with `slots` as (team, squad, x, z).
-fn engine(slots: &[(u8, u16, f32, f32)], can_deactivate: bool) -> Engine<Vec<u8>> {
+pub(crate) fn engine(slots: &[(u8, u16, f32, f32)], can_deactivate: bool) -> Engine<Vec<u8>> {
     engine_with(slots, objectives(can_deactivate))
 }
 
@@ -516,14 +516,14 @@ fn set_caps(engine: &mut Engine<Vec<u8>>, defenders: usize, attackers: usize) {
     p.attacker_cap = attackers;
 }
 
-fn plan_tick(engine: &mut Engine<Vec<u8>>, ms: u64) {
+pub(crate) fn plan_tick(engine: &mut Engine<Vec<u8>>, ms: u64) {
     let actors = engine.actor_grid(Duration::from_millis(ms)).unwrap();
     engine
         .tick_bot_objectives(Duration::from_millis(ms), 1, &actors)
         .unwrap();
 }
 
-fn bot_at(engine: &Engine<Vec<u8>>, x: f32, z: f32) -> u16 {
+pub(crate) fn bot_at(engine: &Engine<Vec<u8>>, x: f32, z: f32) -> u16 {
     *engine
         .bot_registry
         .bots
@@ -549,7 +549,7 @@ fn operators(engine: &Engine<Vec<u8>>) -> Vec<u16> {
         .collect()
 }
 
-fn records(engine: &Engine<Vec<u8>>, op: &str) -> Vec<Value> {
+pub(crate) fn records(engine: &Engine<Vec<u8>>, op: &str) -> Vec<Value> {
     engine
         .writer
         .split(|&b| b == b'\n')
@@ -656,6 +656,65 @@ fn arming_retasks_the_nearest_defenders_with_one_defuser_and_attackers_guard() {
         .filter(|r| r["objective"] == PLANTED)
         .collect();
     assert!(tasks.iter().any(|r| r["destination_role"] == "armed_guard"));
+}
+
+/// A bot mid-action on another objective (here a capture it is taking) is
+/// not drafted when a charge is armed: drafting it cancelled its action at
+/// once, flipping that objective back and replaying its voice line.
+#[test]
+fn a_bot_holding_another_objectives_action_is_not_drafted() {
+    let mut e = engine(&SLOTS, true);
+    set_caps(&mut e, 2, 2);
+    plan_tick(&mut e, 100);
+    let holder = bot_at(&e, 54., 60.);
+    let generation = e.bot_registry.bots[&holder]
+        .target
+        .runtime
+        .unwrap()
+        .generation;
+    let actor = crate::objective_control::ObjectiveActor {
+        player: holder,
+        team: 0,
+        generation,
+        position: replication::CharacterPosition {
+            x: 20.,
+            y: 0.,
+            z: 20.,
+        },
+    };
+    let request = protocol::ObjectiveInteraction {
+        target_object_id: 0x0c80_0000 | u32::from(CAPTURE),
+        kind: protocol::ObjectiveInteractionKind::Activate,
+        actor_index: holder,
+        trigger_index: 0,
+    };
+    let world = e.objective_world.as_mut().unwrap();
+    assert!(
+        world
+            .interact(request, actor, Duration::from_millis(120))
+            .accepted
+    );
+    world
+        .development_arm(PLANTED, Duration::from_millis(150))
+        .unwrap();
+    plan_tick(&mut e, 200);
+    assert!(
+        e.bot_registry.bots[&holder].task.armed.is_none(),
+        "the capturing bot was drafted onto the armed charge"
+    );
+    let world = e.objective_world.as_ref().unwrap();
+    assert_eq!(world.state(CAPTURE), Some(ObjectiveState::Activating));
+    assert_eq!(world.interaction_owner(CAPTURE).map(|o| o.0), Some(holder));
+    // The guard places still fill, from the next nearest attackers.
+    let guards: Vec<u16> = e
+        .bot_registry
+        .bots
+        .iter()
+        .filter(|(_, b)| b.task.armed.is_some_and(|d| d.duty == Duty::Guard))
+        .map(|(id, _)| *id)
+        .collect();
+    assert_eq!(guards.len(), 2);
+    assert!(guards.contains(&bot_at(&e, 52., 60.)));
 }
 
 #[test]

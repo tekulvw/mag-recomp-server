@@ -293,6 +293,7 @@ Checks exercise newly invented Lua tables, PSARC resources, ZRB headers, transfo
 | `retail-extraction-coverage.json` | direct | `extract-retail-rules.py` |
 | `retail-extraction-manifest.json` | gap | Hashes and provenance for a completed operator extraction run |
 | `retail-falling-damage.json` | direct | `extract-retail-falling-damage.py` |
+| `retail-vehicle-collision.json` | direct | `extract-retail-vehicle-collision.py` ([vehicle impacts](vehicle-impact-damage.md)) |
 | `retail-incapacitation.json` | direct | `extract-retail-incapacitation-rules.py` ([incapacitation](incapacitation.md)) |
 | `retail-item-bindings.json` | external-proof | `compare-native-item-catalog.py` |
 | `retail-itemlist-native-order.json` | gap | Owner-qualified native token-order snapshots, binding attestation and starter-record evidence |

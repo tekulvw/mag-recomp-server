@@ -239,6 +239,7 @@ impl<W: Write> Engine<W> {
             completed_squad_tags: Vec::new(),
             active_ability_damage_team: None,
             fall_damage_rules: None,
+            vehicle_collision_rules: None,
             incapacitation_rules: None,
             character_damage_rules: None,
             firearm_assists: Default::default(),

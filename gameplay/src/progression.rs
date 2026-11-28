@@ -199,10 +199,26 @@ impl RewardRecipient {
     }
     /// Shared weapon-independent receipt identity for one represented bot life.
     /// The caller proves kill eligibility; no bot account/reservation is invented.
+    #[cfg(test)]
     pub(crate) fn bot_killed(&self, object_index: u16, generation: u32) -> RewardEvent {
+        self.bot_killed_collapse(object_index, generation, 0)
+    }
+    /// A revived bot keeps its life generation, so a later collapse in that
+    /// life names its revival count to stay a distinct kill.
+    pub(crate) fn bot_killed_collapse(
+        &self,
+        object_index: u16,
+        generation: u32,
+        revivals: u32,
+    ) -> RewardEvent {
+        let suffix = if revivals == 0 {
+            String::new()
+        } else {
+            format!("-r{revivals}")
+        };
         self.event(
             format!(
-                "kill-{}-bot-{object_index:04x}-{generation:08x}",
+                "kill-{}-bot-{object_index:04x}-{generation:08x}{suffix}",
                 self.reservation_id
             ),
             RewardKind::EnemyKilled,

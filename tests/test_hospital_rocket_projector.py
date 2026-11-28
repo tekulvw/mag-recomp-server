@@ -133,3 +133,16 @@ class HospitalRocketProjectorTests(unittest.TestCase):
     def test_token_selection_refuses_duplicate_requested_names(self):
         with self.assertRaises(ValueError):
             self.tool.project_tokens(b'', ['same', 'SAME'])
+
+    def test_each_mode_binds_only_its_own_hospital_turret_schema(self):
+        self.assertEqual(set(self.tool.MODES), {'domination', 'acquisition'})
+        for mode, schemas in self.tool.MODES.items():
+            self.assertTrue(schemas['turrets'].startswith(f'mag_{mode}_hospital_turrets_'))
+            self.assertTrue(schemas['rockets'].startswith(f'mag_{mode}_hospital_rockets_'))
+            self.assertIn(mode, schemas['proof'])
+        for mode, other in [('domination', 'acquisition'), ('acquisition', 'domination')]:
+            with self.subTest(mode=mode):
+                rules = {'schema': self.tool.MODES[other]['turrets']}
+                with self.assertRaisesRegex(ValueError, f'{mode} hospital turret rules'):
+                    self.tool.project(self.tool.encode(rules), rules, {}, b'', None, None, None,
+                                      {}, mode)

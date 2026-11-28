@@ -153,7 +153,9 @@ impl<W: Write> Engine<W> {
         if self.accepts_subscription_world(world) {
             for (&id, bot) in &self.bot_registry.bots {
                 let Some(runtime) = bot.target.runtime.filter(|runtime| {
-                    bot.health > 0 && !matches!(runtime.phase, development_target::BotPhase::Dead)
+                    bot.downed.is_some()
+                        || (bot.health > 0
+                            && !matches!(runtime.phase, development_target::BotPhase::Dead))
                 }) else {
                     continue;
                 };

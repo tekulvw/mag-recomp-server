@@ -730,6 +730,7 @@ fn unclaimed(bot: &WorldBot) -> bool {
         && !bot.drop_retreat
         && !bot.drop_reroute
         && bot.traffic_yield.is_none()
+        && bot.medic_approach.is_none()
 }
 
 struct Budget {
@@ -1199,7 +1200,7 @@ impl<W: Write> Engine<W> {
         })
         .encode_with_profile(self.wire_profile)
         {
-            self.broadcast_bot_packet(packet);
+            self.broadcast_bot_state_packet(id, packet);
         }
     }
 
