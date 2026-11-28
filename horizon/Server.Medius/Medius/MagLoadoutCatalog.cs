@@ -25,11 +25,12 @@ namespace Server.Medius
         private readonly Dictionary<short, HashSet<byte>> _itemFactions = new Dictionary<short, HashSet<byte>>();
         public int ApplicationId { get; private set; } = 20230;
         private MagLoadoutCatalog() { }
-        public static MagLoadoutCatalog LoadRetail(string path)
+        public static MagLoadoutCatalog LoadRetail(string path) => LoadRetailBytes(File.ReadAllBytes(path));
+        internal static MagLoadoutCatalog LoadRetailBytes(byte[] bytes)
         {
             try
             {
-                using var document = JsonDocument.Parse(File.ReadAllBytes(path));
+                using var document = JsonDocument.Parse(bytes);
                 var root = document.RootElement;
                 if (root.GetProperty("schema_version").GetInt32() != 1 || root.GetProperty("application_id").GetInt32() != 20231)
                     throw new InvalidDataException("Unsupported retail Armory schema/application.");

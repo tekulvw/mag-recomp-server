@@ -28,6 +28,7 @@ void Test(string name, Action action)
     passed++;
 }
 
+Test("2.12 bootstrap profile binds catalogs and refuses legacy gameplay inputs", Bootstrap212Checks.Run);
 Test("2.12 portal tickets preserve required authentication", Profile212Checks.PortalTickets);
 Test("2.12 MAPS character creation and MAS login sessions", Profile212Checks.Sessions);
 Test("2.12 profile IDs and strict selection", Profile212Checks.WireIds);
