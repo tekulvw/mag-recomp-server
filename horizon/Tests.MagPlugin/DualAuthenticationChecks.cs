@@ -6,7 +6,7 @@ using RT.Models.MAG;
 using Server.Common.Stream;
 using Server.Medius;
 
-internal static class DualAuthenticationChecks
+internal static partial class DualAuthenticationChecks
 {
     const long Now = 1_900_000_000;
     const string Service = "MAG_SYNTHETIC_SERVICE";

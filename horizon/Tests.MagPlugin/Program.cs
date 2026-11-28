@@ -206,6 +206,8 @@ Test("dual authentication credential diagnostics", DualAuthenticationChecks.Cred
 Test("dual authentication expiry after database waits", DualAuthenticationChecks.ExpiryAfterLookup);
 Test("dual authentication account admission", DualAuthenticationChecks.Policy);
 Test("dual authentication character identity", DualAuthenticationChecks.CharacterIdentity);
+Test("dual authentication console character conflicts", DualAuthenticationChecks.CharacterConflicts);
+Test("dual authentication PostgreSQL console character conflicts", LeadershipProgressionChecks.PostgresConsoleConflicts);
 Test("dual authentication prototype and retail wire sessions", DualAuthenticationChecks.WireSessions);
 Test("dual authentication PostgreSQL identity and proof contract", DualAuthenticationDatabaseChecks.Run);
 Test("Sony NP 2.1 signature and strict parser", PsnTicketChecks.Run);

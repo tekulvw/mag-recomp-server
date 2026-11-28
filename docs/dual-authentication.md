@@ -69,10 +69,10 @@ cascades identity links; the existing name reservation remains. Bans,
 deletion and unlink prevent new Sony admissions. Existing game-session leases
 are unchanged, so unlink is not an immediate kick/revocation operation.
 
-**Stock MAG display of the system message is unverified.** If the original
-client does not display it, a supported delivery mechanism must be established
-before stock-console linking is usable. Do not ask players to retrieve/log raw
-PSN tickets as a workaround.
+The maintainer has confirmed that the existing path can display text in MAG.
+Actual pairing-code visibility, its display lifetime, retry behavior and the
+complete console authentication flow still require console verification. Do not
+ask players to retrieve/log raw PSN tickets as a workaround.
 
 ## Shared ownership and limitations
 
@@ -81,7 +81,27 @@ owner. Existing signed portal service accounts remain eligible for portal admiss
 only person accounts may acquire or use a Sony link. A signed portal name must still match that account. Sony online IDs can
 differ from the portal name. Character creation checks the request against the
 verified online ID and then preserves the existing canonical-owner NP-ID storage
-contract. No character store or owner names are renamed. Hardware must still
+contract. No character store or owner names are renamed. If a verified Sony session's
+requested character name already belongs to another owner, creation chooses from
+at most 16 unpredictable ASCII fallback candidates using 96 random bits (31
+characters maximum to fit full character records, preserving
+an existing `!0`–`!2` slot suffix). The foreign character remains untouched. The
+assigned character durably stores the original requested name as an owner-scoped
+alias. The Sony-opted-in store API applies the same assignment when a free
+32-character requested name exceeds the full-record limit. Create wire messages
+continue to reject names above 31 characters; this does not expand their parser.
+Exact creation retries and console MAS login/character-data requests
+using that original name select the same owned character after reconnect or
+restart. Character lists and character records return the assigned name. A
+modified creation request is not an exact retry; portal/development creation
+continues to return `NameTaken` on collisions. Deleted characters release their
+alias and slot; historical rows cannot resolve as live selections. Administrative
+restore refuses a final chosen name that conflicts with another live alias of the
+same owner or exceeds the 31-character full-record limit, in both dry run and
+apply. One candidate pool is reused across bounded transaction retries. PostgreSQL
+migration `0005_console_character_alias.sql` adds the nullable alias and a unique
+live owner/alias index. JSON stores preserve the alias under their existing
+durable write lock. Hardware must still
 confirm that console character screens accept these returned canonical NP IDs.
 
 Dual-mode MAG plugin requests execute in a bounded off-tick worker queue: four

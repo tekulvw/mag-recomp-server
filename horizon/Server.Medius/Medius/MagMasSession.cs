@@ -22,6 +22,7 @@ namespace Server.Medius
         public string StorageStatus { get; private set; } = "inactive";
         public string AuthenticatedAccount { get; private set; }
         public string AuthenticatedOnlineId { get; private set; }
+        public string AuthenticatedProvider { get; private set; }
         /// <summary>Only the connection handler may deliver this proof; do not log it.</summary>
         public string ConsoleLinkCode { get; private set; }
         /// <summary>Portal tickets in required mode; null keeps the development identity policy.</summary>
@@ -99,7 +100,7 @@ namespace Server.Medius
                             var refusal = MagPortalTicketPolicy.RefusalReply(request, outcome);
                             return refusal == null ? Array.Empty<RT_MSG_SERVER_PLUGIN_TO_APP>() : Reply(applicationId, refusal);
                         }
-                        AuthenticatedAccount = outcome.Account; PortalAccountId = outcome.AccountId; AuthenticatedOnlineId = outcome.OnlineId;
+                        AuthenticatedAccount = outcome.Account; PortalAccountId = outcome.AccountId; AuthenticatedOnlineId = outcome.OnlineId; AuthenticatedProvider = outcome.Provider;
                         State = SessionState.LocalDevelopmentAuthenticated;
                         return Reply(applicationId, request is MagRetailNpAuthenticateRequest
                             ? new MagRetailNpAuthenticateResponse { TransactionId = request.TransactionId, Success = true }
@@ -123,7 +124,7 @@ namespace Server.Medius
                             request.DnasSignature == string.Empty && MagDevelopmentAccountPolicy.HasZeroRsa(request) && CharacterStore != null)
                         {
                             foreach (var character in CharacterStore.ReadForAccount(AuthenticatedAccount))
-                                if (character.Name == request.AccountName) { ticket = LoginRegistry?.IssueForAccount(AuthenticatedAccount, character.Id, 1, now); if (ticket != null) _selectedCharacterId = character.Id; }
+                                if (LocalCharacterStore.MatchesSelection(character, request.AccountName, AuthenticatedProvider == "psn")) { ticket = LoginRegistry?.IssueForAccount(AuthenticatedAccount, character.Id, 1, now); if (ticket != null) _selectedCharacterId = character.Id; }
                         }
                         StorageStatus = ticket == null ? "account-login-denied" : "account-login-ticket-issued";
                     }
@@ -143,7 +144,7 @@ namespace Server.Medius
                         {
                             foreach (var character in CharacterStore.ReadForAccount(AuthenticatedAccount))
                             {
-                                bool selected = request.QueryKind == 1 ? request.AccountName == character.Name : request.AccountId == character.Id;
+                                bool selected = request.QueryKind == 1 ? LocalCharacterStore.MatchesSelection(character, request.AccountName, AuthenticatedProvider == "psn") : request.AccountId == character.Id;
                                 if (selected && character.Id == _selectedCharacterId)
                                 {
                                     var dataReply = Reply(applicationId, new MagCharacterDataResponse { TransactionId = request.TransactionId, RequestId = request.RequestId,
@@ -165,7 +166,7 @@ namespace Server.Medius
                     try
                     {
                         if (CharacterStore == null) throw new IOException("Character store unavailable.");
-                        var outcome = CharacterStore.CreateForAccount(request, AuthenticatedAccount, AuthenticatedOnlineId); result = outcome.Result; StorageStatus = outcome.Reason;
+                        var outcome = CharacterStore.CreateForAccount(request, AuthenticatedAccount, AuthenticatedOnlineId, AuthenticatedProvider == "psn"); result = outcome.Result; StorageStatus = outcome.Reason;
                         if (result == MagNetResult.Success) State = SessionState.CharacterCreated;
                     }
                     catch (Exception e) when (e is IOException || e is InvalidDataException || e is UnauthorizedAccessException)
