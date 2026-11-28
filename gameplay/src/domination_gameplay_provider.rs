@@ -2180,7 +2180,37 @@ impl<W: Write> Engine<W> {
             .bunker_world
             .as_ref()
             .map(BunkerWorld::repair_tool_profile);
-        let (authority, leadership) = self.plan_structural_repair_authority(tool, now)?;
+        use crate::structural_repair_authority::StructuralRepairAdmission;
+        if !self
+            .domination_gameplay
+            .as_ref()
+            .is_some_and(|world| world.runtime.is_started())
+        {
+            return self.record_structural_repair_denial(
+                "domination_structural_repair",
+                event,
+                request.target_object_id,
+                "domination_gameplay_not_started",
+                now,
+                wall,
+            );
+        }
+        let (authority, leadership) =
+            match self.admit_structural_repair(request.target_object_id, tool, now)? {
+                StructuralRepairAdmission::Admitted(authority, leadership) => {
+                    (authority, leadership)
+                }
+                StructuralRepairAdmission::Denied(code) => {
+                    return self.record_structural_repair_denial(
+                        "domination_structural_repair",
+                        event,
+                        request.target_object_id,
+                        code,
+                        now,
+                        wall,
+                    );
+                }
+            };
         let active = self.active.as_ref().ok_or("no_reservation")?;
         // The live Domination runtime supplies the squad's current FRAGO assignment.
         let credit = self.plan_repair_credit(
