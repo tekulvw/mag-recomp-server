@@ -2,8 +2,9 @@
 //! Route queries never certify raw collision edges; physical movement remains authoritative.
 pub use crate::bot_physics::BodyShape;
 use mag_navmesh_sys::{
-    mag_nav_add_gate, mag_nav_clear_gates, mag_nav_poly_heights, mag_nav_poly_info,
-    mag_nav_polys_in_box,
+    mag_nav_add_gate, mag_nav_gates_free, mag_nav_gates_new, mag_nav_poly_heights,
+    mag_nav_poly_info, mag_nav_polys_in_box, mag_nav_query_bytes, mag_nav_query_free,
+    mag_nav_query_new,
 };
 use mag_navmesh_sys::{
     mag_nav_bake, mag_nav_column_goals, mag_nav_component, mag_nav_component_id, mag_nav_contains,
@@ -16,7 +17,7 @@ use std::{
     cell::Cell,
     ffi::c_int,
     sync::{
-        Mutex, MutexGuard,
+        Arc, Mutex, MutexGuard, RwLock,
         atomic::{AtomicUsize, Ordering},
     },
     time::{Duration, Instant},
@@ -594,12 +595,88 @@ fn bake_layout(
         body_shape: None,
     })
 }
-struct Native(*mut std::ffi::c_void);
-// Native queries have mutable scratch state and are accessed only through the mutex.
-unsafe impl Send for Native {}
-impl Drop for Native {
+/// A loaded native mesh. Only `mag_nav_load` writes it; afterwards every
+/// query only reads it, so query contexts on any thread share it.
+struct NativeMesh(*mut std::ffi::c_void);
+unsafe impl Send for NativeMesh {}
+unsafe impl Sync for NativeMesh {}
+impl Drop for NativeMesh {
     fn drop(&mut self) {
         unsafe { mag_nav_destroy(self.0) }
+    }
+}
+/// One native query context: Detour's search state (node pools, open list)
+/// over a [`NativeMesh`]. One thread uses it at a time.
+struct NativeQuery(*mut std::ffi::c_void);
+unsafe impl Send for NativeQuery {}
+impl Drop for NativeQuery {
+    fn drop(&mut self) {
+        unsafe { mag_nav_query_free(self.0) }
+    }
+}
+/// One native structure gate set, immutable once built.
+struct NativeGates(*mut std::ffi::c_void);
+unsafe impl Send for NativeGates {}
+unsafe impl Sync for NativeGates {}
+impl Drop for NativeGates {
+    fn drop(&mut self) {
+        unsafe { mag_nav_gates_free(self.0) }
+    }
+}
+/// The installed structure gates, replaced only as a whole: a route takes
+/// one state and uses its snapshot and native gates together throughout.
+#[derive(Default)]
+struct GateState {
+    /// Key of the structure snapshot the gates came from.
+    key: Option<(u64, u32)>,
+    /// That snapshot, for steering routes around structures in a polygon.
+    snapshot: Option<Arc<crate::bot_structure_collision::StructureObstacles>>,
+    /// The native gates (None: no gated polygon).
+    native: Option<NativeGates>,
+    /// The installed gates by polygon, with the structures each came from.
+    cache: Arc<GateCache>,
+}
+/// Environment switch restoring the single shared query context, where
+/// queries take turns and off-tick workers wait for running world ticks
+/// (`MAG_NAVMESH_SHARED_QUERY=1`).
+pub const SHARED_QUERY_ENV: &str = "MAG_NAVMESH_SHARED_QUERY";
+/// How queries get a native query context.
+enum Queries {
+    /// Each query takes an idle context, or makes one, and returns it after,
+    /// so queries on different threads run at once.
+    Pool {
+        idle: Mutex<Vec<NativeQuery>>,
+        made: AtomicUsize,
+    },
+    /// One context that every query locks in turn ([`SHARED_QUERY_ENV`]).
+    Shared(Mutex<NativeQuery>),
+}
+/// A native query context held for one query.
+struct QueryLease<'a> {
+    mesh: &'a NavMesh,
+    held: Held<'a>,
+}
+enum Held<'a> {
+    Pooled(Option<NativeQuery>),
+    Shared(MutexGuard<'a, NativeQuery>),
+}
+impl std::ops::Deref for QueryLease<'_> {
+    type Target = NativeQuery;
+    fn deref(&self) -> &NativeQuery {
+        match &self.held {
+            Held::Pooled(query) => query.as_ref().expect("held until dropped"),
+            Held::Shared(query) => query,
+        }
+    }
+}
+impl Drop for QueryLease<'_> {
+    fn drop(&mut self) {
+        if let (Held::Pooled(query), Queries::Pool { idle, .. }) =
+            (&mut self.held, &self.mesh.queries)
+            && let (Some(query), Ok(mut idle)) = (query.take(), idle.lock())
+        {
+            idle.push(query);
+        }
     }
 }
 pub struct NavMesh {
@@ -610,14 +687,13 @@ pub struct NavMesh {
     regional_coverage: Option<regional::Coverage>,
     /// The runtime body shape the mesh was loaded for.
     body_shape: BodyShape,
-    native: Mutex<Native>,
-    /// Key of the structure snapshot the installed gates came from.
-    structure_gates: Mutex<Option<(u64, u32)>>,
-    /// That snapshot, for steering routes around structures in a polygon.
-    structure_snapshot:
-        Mutex<Option<std::sync::Arc<crate::bot_structure_collision::StructureObstacles>>>,
-    /// The installed gates by polygon, with the structures each came from.
-    structure_gate_cache: Mutex<std::sync::Arc<GateCache>>,
+    /// Query contexts; declared before `native`, which they borrow, so they
+    /// are freed first.
+    queries: Queries,
+    node_limit: c_int,
+    native: NativeMesh,
+    /// The installed structure gates.
+    gates: RwLock<Arc<GateState>>,
     /// World ticks using the mesh now (see [`NavMesh::foreground`]).
     foreground: AtomicUsize,
 }
@@ -853,21 +929,34 @@ impl NavMesh {
                 artifact.bounds.min.map(|v| v as f32).as_ptr(),
                 artifact.bounds.max.map(|v| v as f32).as_ptr(),
                 bake_mode(reference, rules.is_some(), wide),
-                node_limit,
             )
         };
         if handle.is_null() {
             return err("navmesh_invalid_binary");
         }
+        let native = NativeMesh(handle);
+        // One context now, so a mesh whose query cannot be made fails to load.
+        let first = NativeQuery(unsafe { mag_nav_query_new(native.0, node_limit) });
+        if first.0.is_null() {
+            return err("navmesh_invalid_binary");
+        }
+        let shared = std::env::var_os(SHARED_QUERY_ENV).is_some_and(|v| v == "1");
         let mut mesh = Self {
             detour_bytes: artifact.detour_data.len(),
             artifact,
             regional_coverage: None,
             body_shape: body,
-            native: Mutex::new(Native(handle)),
-            structure_gates: Mutex::new(None),
-            structure_snapshot: Mutex::new(None),
-            structure_gate_cache: Mutex::new(Default::default()),
+            queries: if shared {
+                Queries::Shared(Mutex::new(first))
+            } else {
+                Queries::Pool {
+                    idle: Mutex::new(vec![first]),
+                    made: AtomicUsize::new(1),
+                }
+            },
+            node_limit,
+            native,
+            gates: Default::default(),
             foreground: AtomicUsize::new(0),
         };
         mesh.validate_drop_links()?;
@@ -875,35 +964,88 @@ impl NavMesh {
         mesh.artifact.detour_data = Vec::new();
         Ok(mesh)
     }
-    /// Give this thread's queries priority over background queries until the
-    /// guard drops. The world tick holds it for the whole tick.
+    /// Mark this thread as running a world tick until the guard drops. The
+    /// world tick holds it for the whole tick.
     ///
-    /// Every query locks the one native query object. Off-tick workers (spawn
-    /// route checks, squad routes, structure gates) run whole-mesh searches
-    /// that can hold it for tens of milliseconds each, back to back, while a
-    /// tick locks it once or more per moving bot. Without a turn order every
-    /// such lock could wait for a full background search, so one tick could
-    /// last a second. With the guard held, a background query waits for the
-    /// tick to finish (at most [`BACKGROUND_WAIT_LIMIT`]) before it starts, so
-    /// a tick waits for at most the one background search already running.
+    /// By default every query takes its own native query context over the
+    /// shared read-only mesh, so a tick never waits for an off-tick worker's
+    /// search (spawn route checks, squad routes, structure gates), and the
+    /// guard changes nothing.
+    ///
+    /// With [`SHARED_QUERY_ENV`] every query locks the one context. Workers
+    /// run whole-mesh searches that can hold it for tens of milliseconds each,
+    /// back to back, while a tick locks it once or more per moving bot, so
+    /// without a turn order one tick could last a second. With the guard held,
+    /// a background query waits for the tick to finish (at most
+    /// [`BACKGROUND_WAIT_LIMIT`]) before it starts, so a tick waits for at
+    /// most the one background search already running.
     pub(crate) fn foreground(&self) -> Foreground<'_> {
         self.foreground.fetch_add(1, Ordering::Acquire);
         let outer = FOREGROUND.with(|f| f.replace(true));
         Foreground { mesh: self, outer }
     }
-    /// Lock the native query object; a background thread first lets running
-    /// world ticks finish.
-    fn lock_native(&self) -> Result<MutexGuard<'_, Native>, Error> {
-        if !FOREGROUND.with(Cell::get) {
-            let began = Instant::now();
-            while self.foreground.load(Ordering::Acquire) > 0
-                && began.elapsed() < BACKGROUND_WAIT_LIMIT
-            {
-                std::thread::sleep(Duration::from_micros(500));
-            }
+    /// Use the one shared native context from now on, as [`SHARED_QUERY_ENV`]
+    /// does at load.
+    #[cfg(test)]
+    pub(crate) fn share_one_query(&mut self) {
+        if let Queries::Pool { idle, .. } = &mut self.queries {
+            let first = idle.get_mut().unwrap().pop().expect("made at load");
+            self.queries = Queries::Shared(Mutex::new(first));
         }
-        self.native
-            .lock()
+    }
+    /// Native query contexts made so far, and the bytes Detour allocates for
+    /// each (see [`SHARED_QUERY_ENV`] for the one-context mode).
+    pub fn query_contexts(&self) -> (usize, usize) {
+        let made = match &self.queries {
+            Queries::Pool { made, .. } => made.load(Ordering::Relaxed),
+            Queries::Shared(_) => 1,
+        };
+        (made, unsafe { mag_nav_query_bytes(self.node_limit) })
+    }
+    /// A native query context for one query: an idle one or a new one; with
+    /// [`SHARED_QUERY_ENV`], the one context, after a background thread has
+    /// let running world ticks finish.
+    fn lock_native(&self) -> Result<QueryLease<'_>, Error> {
+        let held = match &self.queries {
+            Queries::Pool { idle, made } => {
+                let reused = idle
+                    .lock()
+                    .map_err(|_| Error("navmesh_query_poisoned"))?
+                    .pop();
+                let query = match reused {
+                    Some(query) => query,
+                    None => {
+                        let query = NativeQuery(unsafe {
+                            mag_nav_query_new(self.native.0, self.node_limit)
+                        });
+                        if query.0.is_null() {
+                            return err("navmesh_query_unavailable");
+                        }
+                        made.fetch_add(1, Ordering::Relaxed);
+                        query
+                    }
+                };
+                Held::Pooled(Some(query))
+            }
+            Queries::Shared(query) => {
+                if !FOREGROUND.with(Cell::get) {
+                    let began = Instant::now();
+                    while self.foreground.load(Ordering::Acquire) > 0
+                        && began.elapsed() < BACKGROUND_WAIT_LIMIT
+                    {
+                        std::thread::sleep(Duration::from_micros(500));
+                    }
+                }
+                Held::Shared(query.lock().map_err(|_| Error("navmesh_query_poisoned"))?)
+            }
+        };
+        Ok(QueryLease { mesh: self, held })
+    }
+    /// The installed structure gates (cheap: one shared reference).
+    fn gate_state(&self) -> Result<Arc<GateState>, Error> {
+        self.gates
+            .read()
+            .map(|state| Arc::clone(&state))
             .map_err(|_| Error("navmesh_query_poisoned"))
     }
     /// Polygons whose bounds overlap the box `min`..`max`.
@@ -968,50 +1110,70 @@ impl NavMesh {
     }
     /// Key of the installed structure gates (None: none installed).
     pub(crate) fn structure_gate_key(&self) -> Option<(u64, u32)> {
-        self.structure_gates.lock().ok().and_then(|key| *key)
+        self.gate_state().ok().and_then(|state| state.key)
+    }
+    /// The installed gates by polygon (shared; cheap to take).
+    pub(crate) fn structure_gate_cache(&self) -> Arc<GateCache> {
+        self.gate_state()
+            .map(|state| Arc::clone(&state.cache))
+            .unwrap_or_default()
     }
     /// Replace every structure gate. Routes from then on avoid sealed
     /// crossings and end before one when nothing else reaches the goal.
-    /// The installed gates by polygon (shared; cheap to take).
-    pub(crate) fn structure_gate_cache(&self) -> std::sync::Arc<GateCache> {
-        self.structure_gate_cache
-            .lock()
-            .map(|c| c.clone())
-            .unwrap_or_default()
-    }
+    ///
+    /// The new gates are built beside the installed ones and replace them in
+    /// one step: a route already running keeps the gates it started with, and
+    /// one starting after this returns uses the new ones. Invalid gates
+    /// install none (routes use the static mesh) and fail.
     pub(crate) fn set_structure_gates(
         &self,
-        snapshot: Option<&std::sync::Arc<crate::bot_structure_collision::StructureObstacles>>,
+        snapshot: Option<&Arc<crate::bot_structure_collision::StructureObstacles>>,
         gates: &[PolyGate],
         cache: GateCache,
     ) -> Result<(), Error> {
+        let cache = Arc::new(cache);
+        let (state, result) = match Self::native_gates(gates) {
+            Ok(native) => (
+                GateState {
+                    key: snapshot.map(|s| s.key()),
+                    snapshot: snapshot.cloned(),
+                    native,
+                    cache,
+                },
+                Ok(()),
+            ),
+            Err(error) => (
+                GateState {
+                    cache,
+                    ..Default::default()
+                },
+                Err(error),
+            ),
+        };
         *self
-            .structure_gate_cache
-            .lock()
-            .map_err(|_| Error("navmesh_query_poisoned"))? = std::sync::Arc::new(cache);
-        let key = snapshot.map(|s| s.key());
-        *self
-            .structure_snapshot
-            .lock()
-            .map_err(|_| Error("navmesh_query_poisoned"))? = None;
-        let h = self.lock_native()?;
-        let mut installed = self
-            .structure_gates
-            .lock()
-            .map_err(|_| Error("navmesh_query_poisoned"))?;
-        unsafe { mag_nav_clear_gates(h.0) };
-        *installed = None;
+            .gates
+            .write()
+            .map_err(|_| Error("navmesh_query_poisoned"))? = Arc::new(state);
+        result
+    }
+    fn native_gates(gates: &[PolyGate]) -> Result<Option<NativeGates>, Error> {
+        if gates.is_empty() {
+            return Ok(None);
+        }
+        let native = NativeGates(unsafe { mag_nav_gates_new() });
+        if native.0.is_null() {
+            return err("navmesh_structure_gate_invalid");
+        }
         for gate in gates {
             let refs: Vec<u64> = gate.links.iter().map(|l| l.0).collect();
             let full: Vec<u64> = gate.links.iter().map(|l| l.1).collect();
             let through: Vec<u64> = gate.links.iter().map(|l| l.2).collect();
             if gate.labels.len() != gate.size[0] * gate.size[1] {
-                unsafe { mag_nav_clear_gates(h.0) };
                 return err("navmesh_structure_gate_invalid");
             }
             let ok = unsafe {
                 mag_nav_add_gate(
-                    h.0,
+                    native.0,
                     gate.poly,
                     gate.origin_xz[0] as f32,
                     gate.origin_xz[1] as f32,
@@ -1026,18 +1188,10 @@ impl NavMesh {
                 )
             };
             if ok == 0 {
-                unsafe { mag_nav_clear_gates(h.0) };
                 return err("navmesh_structure_gate_invalid");
             }
         }
-        *installed = key;
-        drop(installed);
-        drop(h);
-        *self
-            .structure_snapshot
-            .lock()
-            .map_err(|_| Error("navmesh_query_poisoned"))? = snapshot.cloned();
-        Ok(())
+        Ok(Some(native))
     }
     /// Runtime coverage comes from the loaded collision world, not artifact assertions.
     pub fn validate_coverage(&self, world: &crate::collision::CollisionWorld) -> Result<(), Error> {
@@ -1131,16 +1285,13 @@ impl NavMesh {
         let mut stages = 0;
         // Placed structures gate the route, unless it starts in a structure's
         // enclosed room: a life started there walks out through the walls.
-        let snapshot = self
-            .structure_snapshot
-            .lock()
-            .map_err(|_| Error("navmesh_query_poisoned"))?
-            .clone()
-            .filter(|s| !s.enclosed(start));
+        let gates = self.gate_state()?;
+        let snapshot = gates.snapshot.clone().filter(|s| !s.enclosed(start));
         let h = self.lock_native()?;
         let status = unsafe {
             mag_nav_route(
                 h.0,
+                gates.native.as_ref().map_or(std::ptr::null(), |g| g.0),
                 s.as_ptr(),
                 g.as_ptr(),
                 goal_radius as f32,

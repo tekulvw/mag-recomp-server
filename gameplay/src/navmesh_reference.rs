@@ -148,14 +148,9 @@ impl ReferenceNavMesh {
     }
 
     pub fn tile_stats(&self) -> Result<(u32, u32), Error> {
-        let native = self
-            .0
-            .native
-            .lock()
-            .map_err(|_| Error("navmesh_lock_poisoned"))?;
         let (mut tiles, mut max_polygons) = (0, 0);
-        // The locked handle owns validated native tiles for the duration of the query.
-        unsafe { mag_nav_tile_stats(native.0, &mut tiles, &mut max_polygons) };
+        // The loaded mesh owns validated native tiles and is only read now.
+        unsafe { mag_nav_tile_stats(self.0.native.0, &mut tiles, &mut max_polygons) };
         Ok((tiles as u32, max_polygons as u32))
     }
 }

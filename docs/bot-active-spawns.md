@@ -133,17 +133,25 @@ So the server never routes for a spawn choice inside the world tick:
   population on its own worker thread, started at the same time. Until it
   answers, squads rank as routable, as they do without navigation data.
 
-The workers and the tick share the navmesh's one native query object, and a
-worker search holds it for the whole search. A world tick locks it at least
-once per moving bot, so with no turn order every one of those locks could
-wait for a whole worker search. Late in a live 256-character Domination match
-(0.19.0, 2026-11-28) the spawn-route worker had used 212 s of CPU, and the
-world spent up to 28% of the time in ticks of 0.5–1 s; every client event,
-hits included, waited behind them. So the tick now goes first: while a world
-tick runs, a worker waits before it starts a navmesh query (at most 200 ms,
-so a world that never stops ticking cannot starve it), and a tick waits only
-for the one worker search already under way. The structure gate and squad
-route workers wait the same way.
+The workers and the tick search the same navmesh at once. The loaded Detour
+mesh is only read after it loads, so every query takes its own native query
+context (Detour's node pools and open list, about 0.6 MiB at 16,384 search
+nodes), reusing an idle one or making one, and a world tick never waits for a
+worker search. Structure gates are immutable sets: the gate worker builds a
+new set and swaps it in whole, and each route uses the set it started with.
+
+Before that (0.19.0), the workers and the tick shared one native query
+object, and a worker search held it for the whole search. A world tick locks
+it at least once per moving bot, so every one of those locks could wait for a
+whole worker search. Late in a live 256-character Domination match
+(2026-11-28) the spawn-route worker had used 212 s of CPU, and the world spent
+up to 28% of the time in ticks of 0.5–1 s; every client event, hits included,
+waited behind them. A turn order fixed the stalls: while a world tick runs, a
+worker waits before it starts a navmesh query (at most 200 ms, so a world
+that never stops ticking cannot starve it). But workers then searched only
+between ticks, and a 256-character simulation qualified about a tenth as many
+lane spawns. `MAG_NAVMESH_SHARED_QUERY=1` restores that one shared query
+object and the turn order, for comparison.
 
 Synthetic unit tests keep the routes inline so their expectations are
 unchanged. The headless simulation queues as live, then waits for the answers

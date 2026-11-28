@@ -482,3 +482,111 @@ fn only_a_beside_route_reaches_a_walled_off_goal_beside_it() {
     let short = mesh.route_beside([5., 0., 10.], goal, 0.5).unwrap();
     assert_eq!(short.status, Status::Partial, "{short:?}");
 }
+
+/// What a route found, without its timing.
+fn found(route: &navmesh::Route) -> String {
+    format!(
+        "{:?} {:?} {:?}",
+        route.status, route.waypoints, route.corridor_refs
+    )
+}
+
+/// Requests whose routes differ between a closed gate and a gate with an
+/// opening, routed with each start in and out of the structure's reach.
+const GATE_REQUESTS: [([f64; 3], [f64; 3]); 4] = [
+    ([5., 0., 10.], [35., 0., 10.]),
+    ([5., 0., 3.], [35., 0., 3.]),
+    ([35., 0., 17.], [5., 0., 12.]),
+    ([18., 0., 2.], [22., 0., 18.]),
+];
+
+/// A closed gate and one with an opening, as structure snapshots.
+fn closed_and_open_gates() -> [Arc<StructureObstacles>; 2] {
+    [0., 2.].map(|gap| {
+        let mut sequences = SequenceCollisionState::default();
+        sequences.synthetic_structure_mesh(
+            3,
+            Pose::at([20., 0., 10.]),
+            gate(gap),
+            Some(PACK_LAYER),
+        );
+        snapshot(&sequences)
+    })
+}
+
+/// Each request's route under the gates installed now.
+fn routes_now(mesh: &NavMesh) -> Vec<String> {
+    GATE_REQUESTS
+        .iter()
+        .map(|&(from, to)| found(&mesh.route(from, to, 0.5).unwrap()))
+        .collect()
+}
+
+#[test]
+fn routes_during_gate_changes_match_the_routes_of_one_gate_set() {
+    let floor = floor_world();
+    let mesh = Arc::new(floor_mesh(&floor));
+    let gates = closed_and_open_gates();
+    let serial = gates.clone().map(|structures| {
+        crate::navmesh_structure_gates::install_now(&mesh, Some(&structures)).unwrap();
+        routes_now(&mesh)
+    });
+    assert_ne!(serial[0], serial[1]);
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let routers: Vec<_> = (0..4)
+        .map(|_| {
+            let (mesh, stop, serial) = (mesh.clone(), stop.clone(), serial.clone());
+            std::thread::spawn(move || {
+                let mut seen = [0usize; 2];
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    for (i, &(from, to)) in GATE_REQUESTS.iter().enumerate() {
+                        let route = found(&mesh.route(from, to, 0.5).unwrap());
+                        let set = serial.iter().position(|routes| routes[i] == route);
+                        // A route uses one gate set throughout, never a mix.
+                        seen[set.unwrap_or_else(|| panic!("request {i}: {route}"))] += 1;
+                    }
+                }
+                seen
+            })
+        })
+        .collect();
+    for change in 0..60 {
+        crate::navmesh_structure_gates::install_now(&mesh, Some(&gates[change % 2])).unwrap();
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    for router in routers {
+        router.join().expect("a concurrent route differed");
+    }
+    assert!(mesh.query_contexts().0 >= 2, "the routes ran at once");
+}
+
+#[test]
+fn a_route_started_after_gates_change_on_another_thread_uses_the_new_gates() {
+    let floor = floor_world();
+    let mesh = Arc::new(floor_mesh(&floor));
+    let gates = closed_and_open_gates();
+    let serial = gates.clone().map(|structures| {
+        crate::navmesh_structure_gates::install_now(&mesh, Some(&structures)).unwrap();
+        routes_now(&mesh)
+    });
+    let (changed, inbox) = std::sync::mpsc::channel::<usize>();
+    let (answer, answers) = std::sync::mpsc::channel();
+    let router = {
+        let mesh = mesh.clone();
+        std::thread::spawn(move || {
+            for set in inbox {
+                answer.send((set, routes_now(&mesh))).unwrap();
+            }
+        })
+    };
+    // The installer runs on this thread, the routes on the other.
+    for change in 0..20 {
+        let set = change % 2;
+        crate::navmesh_structure_gates::install_now(&mesh, Some(&gates[set])).unwrap();
+        changed.send(set).unwrap();
+        let (routed, routes) = answers.recv().unwrap();
+        assert_eq!(routes, serial[routed], "change {change}");
+    }
+    drop(changed);
+    router.join().unwrap();
+}

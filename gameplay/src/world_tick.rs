@@ -18,7 +18,8 @@ impl<W: Write> Engine<W> {
             return self.world_response(request_id, Vec::new());
         }
         self.last_world_tick = Some(now);
-        // The tick's navmesh queries go before off-tick workers' searches.
+        // With one shared navmesh query context (MAG_NAVMESH_SHARED_QUERY=1)
+        // the tick's queries go before off-tick workers' searches.
         let mesh = self.navmesh_world.clone();
         let _foreground = mesh.as_deref().map(crate::navmesh::NavMesh::foreground);
         let result = (|| {

@@ -111,8 +111,10 @@ again and a repaired one closes it. A polygon whose structures are unchanged
 
 The world tick only takes the new snapshot, which it indexes on a 16 m
 horizontal grid. The enclosed-room analysis and the polygon gates are built
-on a worker thread. Until they are installed, routes keep the previous gates
-and newly placed structures show no rooms. Sweeps test each structure only
+on a worker thread, beside the installed ones, and replace them in one step.
+Until then routes keep the previous gates and newly placed structures show no
+rooms; a route already searching keeps the gates it started with, and routes
+on other threads search at the same time. Sweeps test each structure only
 where the swept body is near its bounds, in legs of at most 2 m.
 
 ## Evidence and limits
