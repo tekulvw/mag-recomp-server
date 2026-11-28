@@ -185,61 +185,82 @@ fn a_squad_far_from_its_point_gathers_then_pushes_together() {
             1,
             Some(Wave::Rally {
                 point: 7,
-                since: at(0)
+                since: None
             })
         )]
     );
-    // Two of four at the rally place: below 60%, still gathering, no change.
+    // Still walking up long after: no push yet, the wait has not started.
+    assert!(advance_waves(&mut waves, &[input(1, Some(7))], &bots, &policy, at(60_000)).is_empty());
+    // Two of four at the rally place: below 60%, still gathering. The wait
+    // starts now, and that is not a new wave.
     let bots = BTreeMap::from([(
         1,
         vec![[40., 0., 0.], [41., 0., 2.], [120., 0., 0.], [120., 0., 0.]],
     )]);
-    assert!(advance_waves(&mut waves, &[input(1, Some(7))], &bots, &policy, at(5000)).is_empty());
+    assert!(advance_waves(&mut waves, &[input(1, Some(7))], &bots, &policy, at(65_000)).is_empty());
+    assert_eq!(
+        waves[&1],
+        Wave::Rally {
+            point: 7,
+            since: Some(at(65_000))
+        }
+    );
     // Three of four: push.
     let bots = BTreeMap::from([(
         1,
         vec![[40., 0., 0.], [41., 0., 2.], [45., 0., -3.], [120., 0., 0.]],
     )]);
     assert_eq!(
-        advance_waves(&mut waves, &[input(1, Some(7))], &bots, &policy, at(6000)),
+        advance_waves(&mut waves, &[input(1, Some(7))], &bots, &policy, at(66_000)),
         vec![(
             1,
             Some(Wave::Push {
                 point: 7,
-                since: at(6000)
+                since: at(66_000)
             })
         )]
     );
     // Leaving the rally place, still behind the rally distance: no flip back.
-    assert!(advance_waves(&mut waves, &[input(1, Some(7))], &bots, &policy, at(6050)).is_empty());
+    assert!(advance_waves(&mut waves, &[input(1, Some(7))], &bots, &policy, at(66_050)).is_empty());
     // Pushing bots inside the rally distance keep the push, even as others
     // fall back or respawn far away.
     let bots = BTreeMap::from([(1, vec![[5., 0., 0.], [120., 0., 0.]])]);
-    assert!(advance_waves(&mut waves, &[input(1, Some(7))], &bots, &policy, at(9000)).is_empty());
+    assert!(advance_waves(&mut waves, &[input(1, Some(7))], &bots, &policy, at(69_000)).is_empty());
     // Wiped out early: the push still lasts the rally wait.
     let bots = BTreeMap::from([(1, vec![[120., 0., 0.]])]);
-    assert!(advance_waves(&mut waves, &[input(1, Some(7))], &bots, &policy, at(10000)).is_empty());
+    assert!(advance_waves(&mut waves, &[input(1, Some(7))], &bots, &policy, at(70_000)).is_empty());
     // Then the next wave gathers again.
     assert_eq!(
-        advance_waves(&mut waves, &[input(1, Some(7))], &bots, &policy, at(26000)),
+        advance_waves(&mut waves, &[input(1, Some(7))], &bots, &policy, at(86_000)),
         vec![(
             1,
             Some(Wave::Rally {
                 point: 7,
-                since: at(26000)
+                since: None
             })
         )]
     );
 }
 
 #[test]
-fn a_rally_ends_after_its_wait_and_squads_already_forward_push_at_once() {
+fn a_rally_ends_its_wait_after_the_first_arrival_and_squads_forward_push_at_once() {
     let policy = Policy::default();
     let mut waves = BTreeMap::new();
-    let bots = BTreeMap::from([(1, vec![[120., 0., 0.]]), (2, vec![[10., 0., 0.]])]);
+    // Squad 1: one of three at the rally place. Squad 2: a bot forward.
+    let bots = BTreeMap::from([
+        (1, vec![[40., 0., 0.], [120., 0., 0.], [120., 0., 0.]]),
+        (2, vec![[10., 0., 0.]]),
+    ]);
     let inputs = [input(1, Some(7)), input(2, Some(7))];
     let changes = advance_waves(&mut waves, &inputs, &bots, &policy, at(0));
     assert_eq!(changes.len(), 2);
+    assert_eq!(
+        waves[&1],
+        Wave::Rally {
+            point: 7,
+            since: Some(at(0))
+        }
+    );
     assert_eq!(
         waves[&2],
         Wave::Push {
@@ -311,7 +332,7 @@ fn a_squad_without_living_bots_keeps_its_wave() {
 fn the_documented_population_object_is_the_default_and_unknown_fields_are_refused() {
     let documented: Policy = serde_json::from_value(serde_json::json!({
         "enabled": true, "game_types": [2], "hold_radius_m": [2.5, 7.0],
-        "stage_hold_squads": 1, "rally_back_m": 35.0, "rally_radius_m": 12.0,
+        "stage_hold_squads": 1, "breach_reserve_squads": 1, "rally_back_m": 35.0, "rally_radius_m": 12.0,
         "rally_share": 0.6, "rally_wait_ms": 20000
     }))
     .unwrap();

@@ -69,6 +69,15 @@ reinforcement is the squad's current objective
 automatic tag, and bot lives spawn towards it. A human leader's FRAGO still
 comes first.
 
+## Defences
+
+While a point's defences stand ([bot-breach-order.md](bot-breach-order.md)),
+`breach_reserve_squads` (default 1) of its attacking squads stay on the
+point and the others break the defences. This raises the breach policy's
+`attacker_reserve_squads` in these matches only. Before, every attacking
+squad of a lane broke its defences first, for up to `give_up_ms` (5 min) per
+defence, and nobody contested the point meanwhile.
+
 ## Waves
 
 A squad whose open point (state `Deactivated`) has none of its living bots
@@ -76,7 +85,8 @@ within `rally_back_m` (default 35 m) gathers first. Its bots wait at a rally
 place `rally_back_m` before the point, towards the squad's current spawn,
 within `rally_radius_m / 2`. The push starts when `rally_share` (default 60%)
 of its living bots are within `rally_radius_m` of the rally place or already
-inside `rally_back_m`, or after `rally_wait_ms` (default 20 s). A squad that
+inside `rally_back_m`, or `rally_wait_ms` (default 20 s) after the first of
+them got there. A squad that
 already has a bot forward pushes at once. A push lasts at least
 `rally_wait_ms`, and then until the squad has no living bot within
 `rally_back_m + rally_radius_m` of the point. Squad members on another duty
@@ -90,7 +100,7 @@ The population file's `assault` object. Omitted fields use these defaults:
 
 ```json
 "assault": {"enabled": true, "game_types": [2], "hold_radius_m": [2.5, 7.0],
-  "stage_hold_squads": 1, "rally_back_m": 35.0, "rally_radius_m": 12.0,
+  "stage_hold_squads": 1, "breach_reserve_squads": 1, "rally_back_m": 35.0, "rally_radius_m": 12.0,
   "rally_share": 0.6, "rally_wait_ms": 20000}
 ```
 

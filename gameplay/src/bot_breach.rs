@@ -619,6 +619,11 @@ impl<W: Write> Engine<W> {
         let Some(world) = self.objective_world.as_ref() else {
             return Ok(());
         };
+        // Domination attackers keep squads on the point while others break
+        // its defences (bot_assault).
+        let assault_reserve = self
+            .bot_assault_policy()
+            .map_or(0, |a| a.breach_reserve_squads);
         let mut events = Vec::new();
         let book = &mut self.bot_registry.director.breach;
         for lane in &plan.lanes {
@@ -639,7 +644,7 @@ impl<W: Write> Engine<W> {
             &lanes,
             open,
             Reserves {
-                attackers: policy.attacker_reserve_squads,
+                attackers: policy.attacker_reserve_squads.max(assault_reserve),
                 defenders: policy.defender_reserve_squads,
             },
         );

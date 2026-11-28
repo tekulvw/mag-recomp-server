@@ -18,10 +18,13 @@
 //!   The others reinforce the open point with the fewest squads (ties: lower
 //!   objective index). A point the defenders take back sends its
 //!   reinforcements home.
+//! - **Defences.** While a point's defences stand, `breach_reserve_squads`
+//!   of its attacking squads stay on the point instead of all of them
+//!   breaking the defences first (bot_breach).
 //! - **Waves.** A squad whose bots are all far from its open point gathers at
 //!   a rally place `rally_back_m` before it (towards the squad's home spawn)
-//!   until `rally_share` of its living bots are there or `rally_wait_ms` has
-//!   passed, then pushes in together. A push lasts at least `rally_wait_ms`;
+//!   until `rally_share` of its living bots are there, or `rally_wait_ms`
+//!   after the first got there, then pushes in together. A push lasts at least `rally_wait_ms`;
 //!   the squad gathers again only once it has no living bot within
 //!   `rally_back_m + rally_radius_m` of the point.
 //!
@@ -43,6 +46,9 @@ pub struct Policy {
     pub hold_radius_m: [f64; 2],
     /// Attacking squads that stay on a secured point while its stage is open.
     pub stage_hold_squads: u16,
+    /// Attacking squads of a point that stay on it while the others break its
+    /// defences (raises `breach.attacker_reserve_squads` in these matches).
+    pub breach_reserve_squads: u16,
     /// Distance of the rally place from the point; `0` turns rallies off.
     pub rally_back_m: f64,
     /// Bots within this distance of the rally place have gathered.
@@ -59,6 +65,7 @@ impl Default for Policy {
             game_types: vec![2],
             hold_radius_m: [2.5, 7.],
             stage_hold_squads: 1,
+            breach_reserve_squads: 1,
             rally_back_m: 35.,
             rally_radius_m: 12.,
             rally_share: 0.6,
@@ -75,6 +82,7 @@ impl Policy {
             || !(0.5..=20.).contains(&inner)
             || !(inner..=30.).contains(&outer)
             || self.stage_hold_squads > 16
+            || self.breach_reserve_squads > 16
             || !self.rally_back_m.is_finite()
             || !(self.rally_back_m == 0. || (10. ..=80.).contains(&self.rally_back_m))
             || !self.rally_radius_m.is_finite()
@@ -193,8 +201,9 @@ fn flat(a: [f64; 3], b: [f64; 3]) -> f64 {
 /// A squad's wave state on one open point.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Wave {
-    /// Gathering at the rally place since then.
-    Rally { point: u16, since: Duration },
+    /// Gathering at the rally place; `since` is when its first bot got
+    /// there.
+    Rally { point: u16, since: Option<Duration> },
     /// Pushing into the point since then.
     Push { point: u16, since: Duration },
 }
@@ -264,7 +273,10 @@ pub(crate) fn advance_waves(
         let ready = !alive.is_empty() && gathered as f64 >= policy.rally_share * alive.len() as f64;
         let next = match waves.get(&s.squad).copied() {
             Some(Wave::Rally { point: p, since }) if p == point => {
-                if ready || now.saturating_sub(since) >= wait {
+                // The wait starts with the first bot at the rally place, so
+                // a squad still walking up does not push in one by one.
+                let since = since.or((gathered > 0).then_some(now));
+                if ready || since.is_some_and(|t| now.saturating_sub(t) >= wait) {
                     Wave::Push { point, since: now }
                 } else {
                     Wave::Rally { point, since }
@@ -280,10 +292,18 @@ pub(crate) fn advance_waves(
                 Wave::Push { point, since }
             }
             _ if forward => Wave::Push { point, since: now },
-            _ => Wave::Rally { point, since: now },
+            _ => Wave::Rally {
+                point,
+                since: (gathered > 0).then_some(now),
+            },
         };
-        if waves.get(&s.squad) != Some(&next) {
-            waves.insert(s.squad, next);
+        let previous = waves.insert(s.squad, next);
+        // Only a new state or point is a change; a rally's first arrival is not.
+        let same = match (previous, next) {
+            (Some(Wave::Rally { point: a, .. }), Wave::Rally { point: b, .. }) => a == b,
+            (previous, next) => previous == Some(next),
+        };
+        if !same {
             changes.push((s.squad, Some(next)));
         }
     }
