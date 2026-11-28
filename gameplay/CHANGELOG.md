@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.19.0](https://github.com/tekulvw/mag-recomp-server/compare/gameplay-v0.18.0...gameplay-v0.19.0) (2026-11-28)
+
+
+### Features
+
+* **gameplay:** heal and refill grenades at Sabotage supply points ([#416](https://github.com/tekulvw/mag-recomp-server/issues/416)) ([7104c0b](https://github.com/tekulvw/mag-recomp-server/commit/7104c0b8091e57deef059d1e4da448033a04d820))
+* **gameplay:** let bots go down so medics can revive them ([#419](https://github.com/tekulvw/mag-recomp-server/issues/419)) ([263ad5b](https://github.com/tekulvw/mag-recomp-server/commit/263ad5b94b3b98f4337f8d30c074a4bb08f6799e))
+* **gameplay:** send the nearest bot medic to a downed teammate ([#420](https://github.com/tekulvw/mag-recomp-server/issues/420)) ([8148462](https://github.com/tekulvw/mag-recomp-server/commit/8148462da395f19d0c9d71760606a121ceb06ea8))
+
+
+### Bug Fixes
+
+* **gameplay:** damage characters that a driven ground vehicle hits ([#417](https://github.com/tekulvw/mag-recomp-server/issues/417)) ([8893ba6](https://github.com/tekulvw/mag-recomp-server/commit/8893ba6b5bbfcc10a8ebb6feeb08a5c65f16bb03))
+* **gameplay:** Domination attackers hold their points, keep stages together and attack in waves ([#418](https://github.com/tekulvw/mag-recomp-server/issues/418)) ([1dd4c50](https://github.com/tekulvw/mag-recomp-server/commit/1dd4c50768614e4bde52c3e336da39e7d3cd65c6))
+* **gameplay:** fire and reload Acquisition field-hospital rockets ([#415](https://github.com/tekulvw/mag-recomp-server/issues/415)) ([8c4d44d](https://github.com/tekulvw/mag-recomp-server/commit/8c4d44dcfb0b56247aee3ea90ab270107f1fe34c))
+* **gameplay:** keep a leader's FRAGO squad together and clear completed tags ([#408](https://github.com/tekulvw/mag-recomp-server/issues/408)) ([894000d](https://github.com/tekulvw/mag-recomp-server/commit/894000dde289d77de3f0531d65be05a294173c8c))
+* **gameplay:** keep destroyed Domination burn-off and cooling towers destroyed ([#413](https://github.com/tekulvw/mag-recomp-server/issues/413)) ([1a85b7e](https://github.com/tekulvw/mag-recomp-server/commit/1a85b7e6291a225b0757590c7c8a966b2f7c8592))
+* **gameplay:** keep every automatic respawn off a wave inside the client's death screen ([#411](https://github.com/tekulvw/mag-recomp-server/issues/411)) ([6a581a5](https://github.com/tekulvw/mag-recomp-server/commit/6a581a56b8b76abe34a183c78edfedc4b1b8b3a2))
+* **gameplay:** pace bot snapshots so a rejoiner can catch up with a full 256-bot world ([#412](https://github.com/tekulvw/mag-recomp-server/issues/412)) ([2f04525](https://github.com/tekulvw/mag-recomp-server/commit/2f04525de2410898accf907bdf35744cfc5445b4))
+* **gameplay:** stop re-sending unchanged Acquisition squad orders after every objective change ([#414](https://github.com/tekulvw/mag-recomp-server/issues/414)) ([51f1d27](https://github.com/tekulvw/mag-recomp-server/commit/51f1d27934bcb393221d81088b09c6b62d996272))
+
 ## [0.18.0](https://github.com/tekulvw/mag-recomp-server/compare/gameplay-v0.17.1...gameplay-v0.18.0) (2026-11-27)
 
 
