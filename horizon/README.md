@@ -47,6 +47,7 @@ The MAG adapter switches in `Server.Medius/Config/ServerSettings.cs` remain opt-
 | Optional starting level for new characters | `MAG_STARTING_LEVEL` |
 | Optional minimum level after completing Training | `MAG_TRAINING_LEVEL` |
 | Optional minimum respec points every character has ([docs/skill-respec.md](../docs/skill-respec.md)) | `MAG_RESPEC_POINTS_FLOOR` |
+| Optional cap on every respec's fee ([docs/skill-respec.md](../docs/skill-respec.md)) | `MAG_RESPEC_FEE_CAP` |
 | Character store | `MagCharacterStorePath` |
 | Optional hours before an abandoned open match reward row can be compacted (default 24; JSON store only) | `MAG_REWARD_LEDGER_OPEN_MATCH_TTL_HOURS` |
 | Character store backend: `json` (default, the file above) or `postgres` | `MAG_CHARACTER_STORE` |

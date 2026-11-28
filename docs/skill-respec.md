@@ -3,7 +3,8 @@
 A player can reset their character's skill tree from the skill screen: a **respec**. It refunds the
 skill points spent on skills, so they can be spent again. Respecs cost **respec points**, a balance
 each character holds. An operator can give every character a minimum balance with
-`MAG_RESPEC_POINTS_FLOOR`.
+`MAG_RESPEC_POINTS_FLOOR`, and cap what any respec costs with `MAG_RESPEC_FEE_CAP`. With both at
+the same value, players can respec as often as they like.
 
 ## What retail did
 
@@ -23,6 +24,15 @@ each character holds. An operator can give every character a minimum balance wit
   and the equipment they awarded. It rebuilds the five kits from the faction's authored defaults,
   grants the free starter (tier 0) skills again, counts the respec (capped at 255) and debits the
   fee.
+- **The client works out the fee it shows.** The request carries no fee, and the server never
+  sends one. The retail skill screen reads two values from the character record it holds: the
+  respec count and the respec points (its `kCharInfoReSpecCount` and `kCharInfoReSpecPoints`
+  character-info entries). It then asks a script function, `ReSpecCost`, for the fee at that
+  count. That function looks the count up in the client's own copy of the authored fee table, with
+  the same lookup the server uses (the last row once the count runs past it), and returns that
+  row's points. So the client shows whatever fee its table gives for the count in the record. Any
+  greying out of the respec when the points are short is the screen's own comparison of those two
+  values. Either way, the server decides.
 - **Earning points.** The only grant proven in the retail client is a creation-time credit
   (`AdditionalRespecPoints` in the creation settings), and the retail settings set it to zero. How
   retail's servers credited points after matches is not known. This server credits none, so without
@@ -51,9 +61,29 @@ each character holds. An operator can give every character a minimum balance wit
   every balance as stored; `0` does the same. A value that is not a whole number from 0 to
   4294967295 stops Medius at startup, naming the variable. Set it in main Medius and MAPS, as for
   `MAG_STARTING_LEVEL`. mag-admin reads it too, so that it shows the balance players see.
-- **A floor below the next fee.** Each respec raises the fee, so a floor pays only for respecs
-  whose fee it covers. Once a character's next fee is above the floor, that character cannot respec
-  again until its stored balance makes up the difference.
+- **A floor below the next fee.** Each respec raises the fee, so a floor alone pays only for
+  respecs whose fee it covers. Once a character's next fee is above the floor, that character
+  cannot respec again until its stored balance makes up the difference. The fee cap removes that
+  limit.
+- **The fee cap.** With `MAG_RESPEC_FEE_CAP=N`, a respec costs the authored fee for the
+  character's count, lowered to N when it is higher. The stored count stays exact: it still
+  counts every respec, and the admin tools show it. Because the client works out the fee it shows
+  from the record's count, the record sent to the client carries a count chosen so that the client
+  shows the charged fee. That is the true count when the authored fee is within the cap. Otherwise
+  it is the highest lower count whose authored fee is within the cap. The authored fees rise, so with
+  the cap at the first fee (3000 on live) the client is sent count 0 and shows 3000 for every respec.
+  Two cases cannot be shown exactly:
+  - With a cap between two authored fees, the client shows the authored fee just below the cap,
+    which is lower than the one charged.
+  - With a cap below every fee, the client is sent count 0 and shows the first fee, which is higher
+    than the one charged.
+  
+  Other players' cards show the same adjusted count. Unset (the default) or empty charges the
+  authored fees, and the record carries the true count. `0` makes respecs free. Bad values and
+  where to set it are as for the floor.
+- **Respecs without limit.** With the floor and the cap at the same value, each respec spends at
+  most the floor, and the floor tops the balance back up. Every respec is then affordable, and the
+  client sees that it is.
 
 ## Storage
 
@@ -67,9 +97,10 @@ each character holds. An operator can give every character a minimum balance wit
 
 ## Admin view
 
-`mag-admin character show` prints a `respec:` line (the balance players see, the stored balance
-when the floor raises it, respecs taken and the next fee), and each slot's respec points in the
-character list. The admin API adds `respec_points` and `respec_count` to every character in
-`GET /admin/v1/accounts` and `GET /admin/v1/characters/{account}`. The selected character also
-gets `stored_respec_points` and `next_respec_fee`. The portal's game-admin character page shows
+`mag-admin character show` prints a `respec:` line: the balance players see, the stored balance
+when the floor raises it, respecs taken (the true count), and the next fee after the cap, with the
+authored fee when the cap lowers it. It also lists each slot's respec points. The admin API adds `respec_points` and `respec_count` to every character in
+`GET /admin/v1/accounts` and `GET /admin/v1/characters/{account}`. `respec_count` is the true count. The selected
+character also gets `stored_respec_points`, `next_respec_fee` (after the cap) and
+`authored_respec_fee`. The portal's game-admin character page shows
 them per slot.

@@ -277,6 +277,7 @@
         "startingLevel": {"oneOf": [{"type": "null"}, {"type": "integer", "minimum": 1, "maximum": 255}]},
         "trainingLevel": {"oneOf": [{"type": "null"}, {"type": "integer", "minimum": 1, "maximum": 255}]},
         "respecPointsFloor": {"oneOf": [{"type": "null"}, {"type": "integer", "minimum": 0, "maximum": 4294967295}]},
+        "respecFeeCap": {"oneOf": [{"type": "null"}, {"type": "integer", "minimum": 0, "maximum": 4294967295}]},
         "rewardLedgerOpenMatchTtlHours": {"oneOf": [{"type": "null"}, {"type": "integer", "minimum": 1, "maximum": 720}]},
         "initialSpawnDelayMs": {
           "oneOf": [

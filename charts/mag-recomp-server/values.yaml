@@ -71,6 +71,11 @@ runtime:
   # back up; a higher stored balance is kept. Applied on read; no row is rewritten.
   # Unset leaves balances as stored (docs/skill-respec.md).
   respecPointsFloor: null
+  # Optional cap on every respec's fee (MAG_RESPEC_FEE_CAP): no respec costs more,
+  # whatever the character's respec count; below it the authored fee applies. With
+  # the floor at the same value, players can respec without limit. Unset charges
+  # the authored, rising fees (docs/skill-respec.md).
+  respecFeeCap: null
   # Optional hours (1-720) an open match reward row may go without a reward
   # before compaction may evict it (MAG_REWARD_LEDGER_OPEN_MATCH_TTL_HOURS).
   # Unset keeps Medius's 24 hour default.

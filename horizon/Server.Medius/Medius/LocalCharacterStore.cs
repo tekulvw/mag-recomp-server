@@ -94,6 +94,14 @@ namespace Server.Medius
         public bool Deleted => DeletedAt != null;
         [JsonIgnore]
         internal uint? RecordRespecPointsFloor { get; set; }
+        [JsonIgnore]
+        internal uint? RecordRespecFeeCap { get; set; }
+        [JsonIgnore]
+        internal MagSkillCatalog RecordSkillCatalog { get; set; }
+        /// <summary>The respec count the client is sent: the stored one, unless a fee cap needs the client to show a
+        /// lower fee (<see cref="MagSkillCatalog.ClientRespecCount"/>).</summary>
+        [JsonIgnore]
+        public byte ClientRespecCount => RecordSkillCatalog?.ClientRespecCount(RespecCount ?? 0, RecordRespecFeeCap) ?? RespecCount ?? 0;
         /// <summary>The respec points the character can spend: its stored balance, raised to the operator floor
         /// when one is set. A balance above the floor is kept.</summary>
         [JsonIgnore]
@@ -116,7 +124,7 @@ namespace Server.Medius
                 LeadershipPoints = Leadership?.LeadershipPoints ?? 0,
                 LeadershipNominations = Leadership?.Nominations ?? 0,
                 MatchesSinceLastCommand = Leadership?.MatchesSinceLastCommand ?? 0,
-                RespecCount = RespecCount ?? 0, RespecPoints = AvailableRespecPoints,
+                RespecCount = ClientRespecCount, RespecPoints = AvailableRespecPoints,
                 AvailableItems = MergeMask(grants?.AvailableItems, UnlockedItems, 24), Skills = MergeMask(grants?.Skills, OwnedSkills, 5),
                 Loadouts = Loadouts?.Select(row => row.ToLoadout()).ToArray() ?? RecordCatalog?.DefaultsForFaction(Faction) ??
                     Enumerable.Range(0, 5).Select(_ => new MagLoadout()).ToArray()
@@ -364,6 +372,10 @@ namespace Server.Medius
         /// whenever its record is built (at login, on the character screens and after a respec), so a spend is topped
         /// back up. Applied on read; the stored balance is unchanged and a higher one is kept. Null leaves balances as stored.</summary>
         public uint? RespecPointsFloor { get; set; }
+        /// <summary>Operator policy (MAG_RESPEC_FEE_CAP): no respec costs more than this, whatever the character's respec
+        /// count; the authored fee applies below it. The stored count stays exact, and the record the client receives
+        /// carries a count whose authored fee the client shows as the charged one. Null charges the authored fees.</summary>
+        public uint? RespecFeeCap { get; set; }
         private readonly ICharacterStoreCommitter _committer;
         // Where characters persist: the JSON file below, or PostgreSQL (LocalCharacterStore.Postgres.cs).
         // Every rule in this class runs unchanged against either; a backend only loads and saves.
@@ -420,6 +432,8 @@ namespace Server.Medius
             character.RecordCatalog = LoadoutCatalog;
             character.RecordInitialSkillPoints = InitialSkillPoints;
             character.RecordRespecPointsFloor = RespecPointsFloor;
+            character.RecordRespecFeeCap = RespecFeeCap;
+            character.RecordSkillCatalog = SkillCatalog;
             character.RecordProgressionCatalog = ProgressionCatalog;
             if (ProgressionCatalog != null && (character.Level ?? 1) != ProgressionCatalog.LevelForExperience(character.Experience ?? 0))
                 throw new InvalidDataException("Persisted XP/level does not match the progression catalog.");

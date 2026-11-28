@@ -180,6 +180,8 @@ Test("skill respec refunds, rebuilds kits, spends the fee and the floor tops it 
 Test("skill respec refusals change nothing and answer a bare failure", LeadershipProgressionChecks.RespecRefusals);
 Test("respec points per slot in mag-admin and the admin API", LeadershipProgressionChecks.RespecAdminView);
 Test("postgres skill respec stores the count and balance and floors on read", LeadershipProgressionChecks.PostgresRespec);
+Test("respec fee cap setting, charged fee and the count the client is sent", LeadershipProgressionChecks.RespecFeeCapSetting);
+Test("respec fee cap: ten respecs in a row each cost and show 3000; unset fees rise", LeadershipProgressionChecks.RespecFeeCapRepeats);
 Test("account-bound NP identity creation and persistence", NpIdentityChecks.Run);
 Test("MLS answers lobby player-card character data for any character", LeadershipProgressionChecks.PlayerCardLookup);
 Test("retail player online and game-info wire", LeadershipProgressionChecks.PlayerStatusWire);
