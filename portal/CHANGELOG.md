@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.0](https://github.com/tekulvw/mag-recomp-server/compare/portal-v0.9.0...portal-v0.10.0) (2026-11-28)
+
+
+### Features
+
+* **portal:** show every time in the viewer's local time zone ([#421](https://github.com/tekulvw/mag-recomp-server/issues/421)) ([67d8989](https://github.com/tekulvw/mag-recomp-server/commit/67d89898a9aae09e9e21f1aa1e8cc8637895a9ef))
+
 ## [0.9.0](https://github.com/tekulvw/mag-recomp-server/compare/portal-v0.8.0...portal-v0.9.0) (2026-11-27)
 
 
