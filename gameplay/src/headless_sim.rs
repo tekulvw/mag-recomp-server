@@ -34,6 +34,14 @@ pub struct HeadlessSimOptions {
     /// a simulated second, as (object index, second). Diagnostic only: it
     /// stands in for attackers destroying the structure.
     pub structural_completions: Vec<(u16, u64)>,
+    /// Advance virtual time by each tick's own work, as the live scheduler
+    /// does: a tick that takes longer than 50 ms delays the next one instead
+    /// of the world pausing for it (`MAG_SIM_CLOCK=wall`).
+    pub wall_clock: bool,
+    /// With the wall clock: hold the world for `.0` ms once every `.1`
+    /// simulated seconds, standing in for a slow tick, to measure how the
+    /// world recovers from one (`MAG_SIM_STALL=900@30`).
+    pub stall: Option<(u64, u64)>,
 }
 
 impl HeadlessSimOptions {
@@ -47,6 +55,8 @@ impl HeadlessSimOptions {
             snapshots: false,
             warmup_seconds: 0,
             structural_completions: Vec::new(),
+            wall_clock: false,
+            stall: None,
         }
     }
 
@@ -103,6 +113,21 @@ impl HeadlessSimOptions {
                 ));
             }
             options.warmup_seconds = warmup;
+        }
+        options.wall_clock = match lookup("MAG_SIM_CLOCK").as_deref() {
+            None | Some("virtual") => false,
+            Some("wall") => true,
+            Some(other) => return Err(format!("invalid MAG_SIM_CLOCK: {other:?}")),
+        };
+        if let Some(stall) = lookup("MAG_SIM_STALL") {
+            let invalid = || format!("invalid MAG_SIM_STALL: {stall:?}");
+            let (ms, every) = stall.trim().split_once('@').ok_or_else(invalid)?;
+            let ms: u64 = ms.trim().parse().map_err(|_| invalid())?;
+            let every: u64 = every.trim().parse().map_err(|_| invalid())?;
+            if !options.wall_clock || ms == 0 || ms > 10_000 || every == 0 || every > seconds {
+                return Err(invalid());
+            }
+            options.stall = Some((ms, every));
         }
         if let Some(list) = lookup("MAG_SIM_COMPLETE_STRUCTURALS") {
             let invalid = || format!("invalid MAG_SIM_COMPLETE_STRUCTURALS: {list:?}");
@@ -186,6 +211,17 @@ pub struct HeadlessSimReport {
     pub tick_ms: Distribution,
     pub ticks_over_25ms: usize,
     pub ticks_over_50ms: usize,
+    /// With `MAG_SIM_CLOCK=wall`: virtual time from one tick to the next, in
+    /// milliseconds. 50 ms when every tick keeps up.
+    pub tick_interval_ms: Distribution,
+    /// With `MAG_SIM_CLOCK=wall`: how long a client event arriving at a
+    /// uniformly random time waits for the world tick to release the engine,
+    /// in milliseconds, sampled every 10 ms of virtual time. A hit waits this
+    /// long before it is applied and its reply leaves.
+    pub event_wait_ms: Distribution,
+    /// With `MAG_SIM_CLOCK=wall`: share of virtual time inside ticks that ran
+    /// past their 50 ms slot, a stalled world.
+    pub stalled_share: f64,
     /// Wall time per phase, in milliseconds (`bots.*` are included in `bots`).
     pub phase_ms: BTreeMap<&'static str, Distribution>,
     /// Wall time per tick interval of the simulated event-reply drains, in
@@ -452,8 +488,9 @@ impl<W: Write> Engine<W> {
     ) -> Result<HeadlessSimReport, String> {
         self.enable_world_ticks();
         self.enable_tick_timing();
-        self.bot_cover.blocking_builds = true;
-        self.bot_spawn_routes.blocking = true;
+        // On the wall clock, off-tick workers run beside the tick as live.
+        self.bot_cover.blocking_builds = !options.wall_clock;
+        self.bot_spawn_routes.blocking = !options.wall_clock;
         let joined = self.headless_sim_join(options, Duration::ZERO, wall0)?;
         self.headless_sim_measure(options, joined, wall0, ticks)
     }
@@ -498,6 +535,11 @@ impl<W: Write> Engine<W> {
         let mut tick_ms = Vec::new();
         let mut phase_ms: Vec<Vec<f64>> = vec![Vec::new(); Phase::ALL.len()];
         let mut alive_sum = 0usize;
+        let mut intervals = Vec::new();
+        let mut event_waits = Vec::new();
+        let mut stalled_ms = 0u128;
+        let mut measured_ms = 0u128;
+        let mut next_stall = options.stall.map(|(_, every)| Duration::from_secs(every));
         let mut now = WORLD_TICK_INTERVAL;
         while now <= Duration::from_secs(options.seconds) {
             let wall = wall0 + now.as_secs();
@@ -601,6 +643,42 @@ impl<W: Write> Engine<W> {
                 report.bots_max = report.bots_max.max(bots);
                 alive_sum += alive;
             }
+            // An injected stall holds the engine like a slow tick would.
+            let mut injected = Duration::ZERO;
+            if let (Some((ms, every)), Some(at)) = (options.stall, next_stall.as_mut())
+                && now >= *at
+            {
+                injected = Duration::from_millis(ms);
+                *at += Duration::from_secs(every);
+            }
+            let advance = if options.wall_clock {
+                // The scheduler starts the next tick once this one returns;
+                // the simulation's own waits for off-tick workers do not
+                // hold the engine live. Stay on the 50 ms grid the cadence
+                // checks expect.
+                let work = elapsed.saturating_sub(timing.get(Phase::SimWorkerWait)) + injected;
+                let slots = work
+                    .as_nanos()
+                    .div_ceil(WORLD_TICK_INTERVAL.as_nanos())
+                    .max(1);
+                if measured {
+                    let interval = WORLD_TICK_INTERVAL.as_millis() * slots;
+                    let work_ms = work.as_millis();
+                    intervals.push(interval as f64);
+                    measured_ms += interval;
+                    if slots > 1 {
+                        stalled_ms += interval;
+                    }
+                    event_waits.extend(
+                        (0..interval)
+                            .step_by(10)
+                            .map(|at| work_ms.saturating_sub(at) as f64),
+                    );
+                }
+                WORLD_TICK_INTERVAL * slots as u32
+            } else {
+                WORLD_TICK_INTERVAL
+            };
             if let Some(out) = ticks.as_mut() {
                 let phases: serde_json::Map<String, Value> = timing
                     .phases()
@@ -615,11 +693,18 @@ impl<W: Write> Engine<W> {
                         "event_drain_ns": event_elapsed.as_nanos() as u64,
                         "sent_packets": response.messages.len() + replies.len(),
                         "sent_bytes": sent.values().map(|s| s.1).sum::<u64>(),
-                        "observers": per_observer, "ok": response.ok})
+                        "observers": per_observer, "ok": response.ok,
+                        "advance_ms": advance.as_millis() as u64,
+                        "injected_ms": injected.as_millis() as u64})
                 )
                 .map_err(|e| e.to_string())?;
             }
-            now += WORLD_TICK_INTERVAL;
+            now += advance;
+        }
+        if options.wall_clock {
+            report.tick_interval_ms = Distribution::of(&intervals);
+            report.event_wait_ms = Distribution::of(&event_waits);
+            report.stalled_share = stalled_ms as f64 / measured_ms.max(1) as f64;
         }
         report.measured_ticks = tick_ms.len();
         report.bots_alive_mean = alive_sum as f64 / tick_ms.len().max(1) as f64;
