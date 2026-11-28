@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.20.0](https://github.com/tekulvw/mag-recomp-server/compare/gameplay-v0.19.0...gameplay-v0.20.0) (2026-11-28)
+
+
+### Features
+
+* **gameplay:** bring bot drop-zone lives down under a parachute ([#429](https://github.com/tekulvw/mag-recomp-server/issues/429)) ([e1351cb](https://github.com/tekulvw/mag-recomp-server/commit/e1351cb24787f4bb7344ad4de8849ffc1a36b7d4))
+
+
+### Bug Fixes
+
+* **gameplay:** acknowledge a downed holder's objective release and name refused hits' life state ([#423](https://github.com/tekulvw/mag-recomp-server/issues/423)) ([133c053](https://github.com/tekulvw/mag-recomp-server/commit/133c053c0e6a560f819caee8cee863e847b43e44))
+* **gameplay:** let the world tick's navmesh queries go before off-tick route searches ([#427](https://github.com/tekulvw/mag-recomp-server/issues/427)) ([88c79e4](https://github.com/tekulvw/mag-recomp-server/commit/88c79e4001b363d771e6118a5442460f1324b2ba))
+* **gameplay:** part box bots that step into each other instead of freezing them in the air ([#424](https://github.com/tekulvw/mag-recomp-server/issues/424)) ([b49d850](https://github.com/tekulvw/mag-recomp-server/commit/b49d85083f0523c51acc8686ff06fa4f02af23a3))
+* **gameplay:** route open drop zones ahead of the wave so attacker bots land there ([#426](https://github.com/tekulvw/mag-recomp-server/issues/426)) ([b411ffe](https://github.com/tekulvw/mag-recomp-server/commit/b411ffeaa0726f32bb82f8736864306a8c9a20b3))
+* **gameplay:** stop kicking players whose repair or objective packet races death, completion or a restart ([#431](https://github.com/tekulvw/mag-recomp-server/issues/431)) ([b9498e1](https://github.com/tekulvw/mag-recomp-server/commit/b9498e1fc7241a0b431419d728ef5bbb6840094a))
+
+
+### Performance Improvements
+
+* **gameplay:** keep lane spawn answers through gate changes and revalidate each at most every 15 s ([#433](https://github.com/tekulvw/mag-recomp-server/issues/433)) ([d02c19c](https://github.com/tekulvw/mag-recomp-server/commit/d02c19cf678e4403baef62ae0afe3e81dc31f592))
+
 ## [0.19.0](https://github.com/tekulvw/mag-recomp-server/compare/gameplay-v0.18.0...gameplay-v0.19.0) (2026-11-28)
 
 
