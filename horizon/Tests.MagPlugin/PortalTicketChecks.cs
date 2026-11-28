@@ -609,7 +609,7 @@ internal static class PortalTicketChecks
                 var oldNp = new byte[36]; Encoding.ASCII.GetBytes("OldPublic").CopyTo(oldNp, 0);
                 Check(store.CreateForAccount(new MagCreateCharacterRequest { AccountName = "OldPublic!0", Faction = 1, HeadId = 2, VoiceId = 3, UniverseId = 26, NpId = oldNp }, "oldpublic", "OldPublic").Result == MagNetResult.Success, "Old character setup");
                 var registry = new MagLoginRegistry();
-                var mas = new MagMasSession { PortalTickets = policy, CharacterStore = store, CharacterStorageEnabled = true, AccountLoginEnabled = true, LoginRegistry = registry };
+                var mas = new MagMasSession { PortalTickets = policy, CharacterStore = store, CharacterStorageEnabled = true, AccountLoginEnabled = true, CharacterDataEnabled = true, LoginRegistry = registry };
                 Wire(e => mas.HandleMany(true, app, e, clock), new MagHello(), app);
                 Wire(e => mas.HandleMany(true, app, e, clock), new MagProtocolInfo { ProtocolVersion = Server.Medius.Program.Settings.MagProtocolVersion }, app);
                 var bytes = Ticket(17, "NewPublic");
@@ -625,6 +625,11 @@ internal static class PortalTicketChecks
                 MagMessageCodec.TryParseForApplication(replies[0].Payload, app, out var message);
                 var login = (MagAccountLoginResponse)message;
                 Check(login.Result == 1, "Existing stored character login denied after rename");
+                var selectedReplies = Wire(e => mas.HandleMany(true, app, e, clock), new MagCharacterDataRequest { QueryKind = 2, AccountId = login.AccountId }, app);
+                Check(selectedReplies.Count == 1 && MagMessageCodec.TryParseForApplication(selectedReplies[0].Payload, app, out var selectedMessage) &&
+                    selectedMessage is MagCharacterDataResponse selected && selected.Success &&
+                    StoredCharacter.DisplayNameFor(selected.Record.Name, selected.Record.NpId) == "NewPublic" && selected.Record.Name == "OldPublic!0",
+                    "MAS selected character record lost signed public NP identity for profile " + app);
                 string Ascii(byte[] field) => Encoding.ASCII.GetString(field).TrimEnd('\0');
                 var mls = new MagMlsSession { CharacterStore = store };
                 Check(mls.TryBind(new RT_MSG_CLIENT_CONNECT_TCP { AppId = app, TargetWorldId = 1, AccessToken = Ascii(login.AccessKey), SessionKey = Ascii(login.SessionKey) }, registry, "renamed-" + app, clock) &&
@@ -635,6 +640,28 @@ internal static class PortalTicketChecks
                 replies = Wire(e => mls.HandleMany(e, clock), new MagCharacterDataRequest { QueryKind = 1, AccountName = "NewPublic" }, app);
                 Check(replies.Count == 1 && MagMessageCodec.TryParseForApplication(replies[0].Payload, app, out parsed) && parsed is MagCharacterDataResponse card && card.Success &&
                     StoredCharacter.DisplayNameFor(card.Record.Name, card.Record.NpId) == "NewPublic" && card.Record.AccountId == login.AccountId, "MLS card missed authenticated public name");
+                var commonRecord = store.ReadForAccount("oldpublic").Single(c => c.Name == "OldPublic!0").ToRecord();
+                var canonicalNp = commonRecord.NpId.ToArray();
+                commonRecord.Experience = 123; commonRecord.SkillPoints = 7;
+                var fullRecords = new List<MagMessage> {
+                    new MagCharacterDataResponse { Success = true, Record = commonRecord },
+                    new MagPurchaseSkillResponse { Success = true, Record = commonRecord },
+                    new MagCharacterRecordNotification { Record = commonRecord }
+                };
+                if (app == 20231) fullRecords.Add(new MagRetailSkillRespecResponse { Success = true, Record = commonRecord });
+                foreach (var fullRecord in fullRecords)
+                {
+                    var envelope = mls.ToClient(fullRecord);
+                    Check(MagMessageCodec.TryParseForApplication(envelope.Payload, app, out var decoded), "Full-record reply did not parse");
+                    var shown = decoded switch {
+                        MagCharacterDataResponse data => data.Record, MagPurchaseSkillResponse skill => skill.Record,
+                        MagCharacterRecordNotification notification => notification.Record, MagRetailSkillRespecResponse respec => respec.Record,
+                        _ => null
+                    };
+                    Check(shown != null && StoredCharacter.DisplayNameFor(shown.Name, shown.NpId) == "NewPublic" &&
+                        shown.Experience == 123 && shown.SkillPoints == 7 && commonRecord.NpId.SequenceEqual(canonicalNp),
+                        "Common outbound full-record identity boundary lost public name, progress or source isolation: " + fullRecord.MessageType);
+                }
                 var old = store.ReadForAccount("oldpublic").Single(c => c.Name == "OldPublic!0");
                 Check(old.NpId.SequenceEqual(oldNp) && old.Name == "OldPublic!0", "Display response rewrote historical character identity");
                 mas.EndPortalSession();

@@ -106,16 +106,24 @@ namespace Server.Medius
             lock (_markerGate) _markerPath = path;
             PublishMarker(now, true);
         }
-        /// <summary>The unique authenticated public name of an owner's live bound credentials.
-        /// Pending tickets do not replace an active player's public identity.</summary>
-        public string PublicNameForOwner(string account, DateTime now)
+        /// <summary>A complete request-scoped snapshot of unambiguous bound public identities.
+        /// Capture once per player-card request; dictionary reads never lock or scan credentials.</summary>
+        public IReadOnlyDictionary<string, string> PublicNamesByOwner(DateTime now)
         {
             lock (_gate)
             {
                 Purge(now);
-                var names = _tickets.Values.Where(t => t.AuthenticatedAccount == account && t.AuthenticatedPublicName != null && t.ChannelId != null)
-                    .Select(t => t.AuthenticatedPublicName).Distinct(StringComparer.Ordinal).ToArray();
-                return names.Length == 1 ? names[0] : null;
+                var names = new Dictionary<string, string>(StringComparer.Ordinal);
+                var ambiguous = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var ticket in _tickets.Values)
+                {
+                    string account = ticket.AuthenticatedAccount, name = ticket.AuthenticatedPublicName;
+                    if (account == null || name == null || ticket.ChannelId == null || ambiguous.Contains(account)) continue;
+                    if (names.TryGetValue(account, out var kept) && kept != name)
+                    { names.Remove(account); ambiguous.Add(account); }
+                    else names[account] = name;
+                }
+                return names;
             }
         }
         /// <summary>True while a client holds a live, channel-bound lease for this account id (the

@@ -195,6 +195,7 @@ Test("gameplay admission carries the display name", LeadershipProgressionChecks.
 Test("portal renamed sessions and credentials", PortalTicketChecks.RenamedSessions);
 Test("portal renamed gameplay admission", LeadershipProgressionChecks.RenamedAdmission);
 Test("portal owner PostgreSQL schema contract", PortalAccountPostgresChecks.Run);
+Test("portal public-name request snapshot", PortalAccountLookupChecks.PublicNameSnapshot);
 Test("portal public cards for other active owners", PortalAccountLookupChecks.PublicCards);
 Test("portal owner cache atomic refresh", PortalAccountLookupChecks.AtomicRefresh);
 Test("portal stable owner mapping", PortalAccountLookupChecks.Cache);

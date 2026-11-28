@@ -260,8 +260,8 @@ namespace Server.Medius
                                 Program.GameplayLobby.QueueJoin(queuedSession,queuedJoin,
                                     message=>{if(CurrentQueueSession())Queue(MagPluginRouting.ToMlsClient(message,queuedApplication),clientChannel);},
                                     CurrentQueueSession,
-                                    record=>{if(CurrentQueueSession()&&record.AccountId==queuedCharacter)Queue(MagPluginRouting.ToMlsClient(
-                                        new RT.Models.MAG.MagCharacterRecordNotification {Record=record},queuedApplication),clientChannel);});
+                                    record=>{if(CurrentQueueSession()&&record.AccountId==queuedCharacter)Queue(queuedSession.ToClient(
+                                        new RT.Models.MAG.MagCharacterRecordNotification {Record=record}),clientChannel);});
                                 break;
                             }
                             if (gameplay is RT.Models.MAG.MagJoinGameRequest join)
@@ -270,7 +270,7 @@ namespace Server.Medius
                               Queue(MagPluginRouting.ToMlsClient(await Program.GameplayLobby.JoinAsync(data.MagMlsSession, join, record => {
                                 var session = data.MagMlsSession;
                                 if (clientChannel.Active && session.State == MagMlsSession.SessionState.Ready && !session.IsExpired(DateTime.UtcNow) && session.CharacterId == record.AccountId)
-                                    Queue(MagPluginRouting.ToMlsClient(new RT.Models.MAG.MagCharacterRecordNotification { Record = record }, session.ApplicationId), clientChannel);
+                                    Queue(session.ToClient(new RT.Models.MAG.MagCharacterRecordNotification { Record = record }), clientChannel);
                             }), data.ApplicationId), clientChannel); break; }
                         }
                         data.MagMlsSession.CharacterStore = Program.CreateCharacterStore();
@@ -286,7 +286,7 @@ namespace Server.Medius
                             void SendPartyMessage(RT.Models.MAG.MagMessage reply)
                             {
                                 if (CurrentPartySession())
-                                    Queue(MagPluginRouting.ToMlsClient(reply, partySession.ApplicationId), clientChannel);
+                                    Queue(partySession.ToClient(reply), clientChannel);
                             }
                             partyRegistry.RegisterPartySession(partySession, CurrentPartySession, SendPartyMessage, record =>
                             {

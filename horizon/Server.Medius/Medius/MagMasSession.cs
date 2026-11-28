@@ -140,7 +140,7 @@ namespace Server.Medius
                                 if (selected && character.Id == _selectedCharacterId)
                                 {
                                     var dataReply = Reply(applicationId, new MagCharacterDataResponse { TransactionId = request.TransactionId, RequestId = request.RequestId,
-                                        Success = true, Record = character.ToRecord() });
+                                        Success = true, Record = MagPublicIdentity.DisplayRecord(character, AuthenticatedPublicName) });
                                     State = SessionState.CharacterDataSent; StorageStatus = "local-character-data-served"; ObserveActivity(now);
                                     return dataReply;
                                 }

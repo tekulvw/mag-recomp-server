@@ -91,7 +91,7 @@ namespace Server.Medius
                         if (outcome.Result == MagNetResult.Success)
                         {
                             ObserveActivity(now);
-                            return new[] { MagPluginRouting.ToMlsClient(new MagCharacterRecordNotification { Record = outcome.Record }, ApplicationId) };
+                            return new[] { ToClient(new MagCharacterRecordNotification { Record = outcome.Record }) };
                         }
                     }
                 }
@@ -112,7 +112,7 @@ namespace Server.Medius
                         var character = CharacterStore.ReadForAccount(AuthenticatedAccount).SingleOrDefault(row => row.Id == CharacterId);
                         if (character != null)
                         {
-                            response.Record = MagPublicIdentity.DisplayRecord(character, _registry?.PublicNameForOwner(character.Account, now));
+                            response.Record = character.ToRecord();
                             response.Success = outcome.Result == MagNetResult.Success;
                         }
                     }
@@ -121,7 +121,7 @@ namespace Server.Medius
                 catch (Exception e) when (e is IOException || e is InvalidDataException || e is UnauthorizedAccessException)
                 { StorageStatus = "skill-storage-error-no-success"; }
                 ObserveActivity(now);
-                return new[] { MagPluginRouting.ToMlsClient(response, ApplicationId) };
+                return new[] { ToClient(response) };
             }
             if (message is MagRetailSkillRespecRequest && ApplicationId == 20231 && State == SessionState.Ready)
             {
@@ -151,7 +151,7 @@ namespace Server.Medius
                 catch (Exception e) when (e is IOException || e is InvalidDataException || e is UnauthorizedAccessException)
                 { StorageStatus = "respec-storage-error-no-success"; }
                 ObserveActivity(now);
-                return new[] { MagPluginRouting.ToMlsClient(response, ApplicationId) };
+                return new[] { ToClient(response) };
             }
             if (message is MagRetailNominationsUpdate nominations && State == SessionState.Ready)
             {
@@ -178,12 +178,13 @@ namespace Server.Medius
                 var response = new MagCharacterDataResponse { TransactionId = lookup.TransactionId, RequestId = lookup.RequestId };
                 try
                 {
+                    var publicNames = _registry?.PublicNamesByOwner(now);
                     var character = CharacterStore == null ? null :
-                        FindCharacter(CharacterStore.ReadAll(), lookup, id => id == CharacterId || _registry?.IsAccountOnline(id, now) == true,
-                            owner => _registry?.PublicNameForOwner(owner, now));
+                        FindCharacter(CharacterStore.ReadAll(), lookup, id => id == CharacterId || _registry?.IsAccountOnline(id, now) == true, publicNames);
                     if (character != null)
                     {
-                        response.Record = MagPublicIdentity.DisplayRecord(character, _registry?.PublicNameForOwner(character.Account, now)); response.Success = true;
+                        string publicName = publicNames != null && publicNames.TryGetValue(character.Account, out var name) ? name : null;
+                        response.Record = MagPublicIdentity.DisplayRecord(character, publicName); response.Success = true;
                         StorageStatus = "character-data-served";
                     }
                     else StorageStatus = CharacterStore == null ? "character-data-store-unavailable" : "character-data-not-found";
@@ -191,7 +192,7 @@ namespace Server.Medius
                 catch (Exception e) when (e is IOException || e is InvalidDataException || e is UnauthorizedAccessException)
                 { StorageStatus = "character-data-storage-error"; }
                 ObserveActivity(now);
-                return new[] { MagPluginRouting.ToMlsClient(response, ApplicationId) };
+                return new[] { ToClient(response) };
             }
             if (message is MagRetailPlayerOnlineRequest online && State == SessionState.Ready)
             {
@@ -243,9 +244,33 @@ namespace Server.Medius
                 MagMessage response = deleting
                     ? new MagRetailLoadoutDeleteResponse { Success = success }
                     : new MagLoadoutUpdateResponse { Success = success };
-                return new[] { MagPluginRouting.ToMlsClient(response, ApplicationId) };
+                return new[] { ToClient(response) };
             }
             ObserveActivity(now); return Array.Empty<RT_MSG_SERVER_PLUGIN_TO_APP>();
+        }
+        /// <summary>Session outbound full-record boundary: public display identity never mutates
+        /// the source record or changes which selected character owns progress.</summary>
+        public RT_MSG_SERVER_PLUGIN_TO_APP ToClient(MagMessage message)
+        {
+            MagCharacterRecord record = message switch {
+                MagCharacterDataResponse data => data.Record,
+                MagPurchaseSkillResponse skill => skill.Record,
+                MagRetailSkillRespecResponse respec => respec.Record,
+                MagCharacterRecordNotification notification => notification.Record,
+                _ => null
+            };
+            if (record != null && record.AccountId == CharacterId)
+            {
+                var display = MagPublicIdentity.DisplayRecord(record, AuthenticatedPublicName);
+                switch (message)
+                {
+                    case MagCharacterDataResponse data: data.Record = display; break;
+                    case MagPurchaseSkillResponse skill: skill.Record = display; break;
+                    case MagRetailSkillRespecResponse respec: respec.Record = display; break;
+                    case MagCharacterRecordNotification notification: notification.Record = display; break;
+                }
+            }
+            return MagPluginRouting.ToMlsClient(message, ApplicationId);
         }
         // Retail clans are not implemented, so every account is in none. The Community screen asks for
         // the player's clan list before it shows anything (Friends included) and accepts "no results"
@@ -288,14 +313,14 @@ namespace Server.Medius
         /// <summary>A player card's character: by id, by stored name, else by the name other players see. Every
         /// character of an account shows the same online ID, so a display name that only one account holds
         /// names the character it is playing (<paramref name="online"/>), else its lowest slot.</summary>
-        public static StoredCharacter FindCharacter(IReadOnlyList<StoredCharacter> characters, MagCharacterDataRequest lookup, Func<uint, bool> online, Func<string, string> publicName = null)
+        public static StoredCharacter FindCharacter(IReadOnlyList<StoredCharacter> characters, MagCharacterDataRequest lookup, Func<uint, bool> online, IReadOnlyDictionary<string, string> publicNames = null)
         {
             if (lookup.QueryKind == 2) return lookup.AccountId == 0 ? null : characters.FirstOrDefault(row => row.Id == lookup.AccountId);
             if (lookup.QueryKind != 1 || string.IsNullOrEmpty(lookup.AccountName)) return null;
             // A live authenticated public identity takes precedence over an unrelated historical
             // character-name string. Ambiguous public identities never select either owner.
-            var authenticated = publicName == null ? Array.Empty<StoredCharacter>() :
-                characters.Where(row => publicName(row.Account) == lookup.AccountName).ToArray();
+            var authenticated = publicNames == null || publicNames.Count == 0 ? Array.Empty<StoredCharacter>() :
+                characters.Where(row => publicNames.TryGetValue(row.Account, out var name) && name == lookup.AccountName).ToArray();
             if (authenticated.Length != 0)
                 return authenticated.Select(row => row.Account).Distinct().Count() == 1
                     ? authenticated.FirstOrDefault(row => online(row.Id)) ?? authenticated.OrderBy(row => row.Slot).First() : null;

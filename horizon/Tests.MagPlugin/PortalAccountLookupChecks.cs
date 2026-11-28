@@ -46,16 +46,41 @@ internal static class PortalAccountLookupChecks
             new StoredCharacter { Account = "oldowner", Id = 42, Slot = 1, Name = "OldPublic!1", NpId = new byte[36] },
             new StoredCharacter { Account = "unrelated", Id = 43, Slot = 0, Name = "NewPublic", NpId = new byte[36] }
         };
+        var publicNames = registry.PublicNamesByOwner(clock);
         var card = MagMlsSession.FindCharacter(rows, new MagCharacterDataRequest { QueryKind = 1, AccountName = "NewPublic" },
-            id => registry.IsAccountOnline(id, clock), owner => registry.PublicNameForOwner(owner, clock));
+            id => registry.IsAccountOnline(id, clock), publicNames);
         Check(card?.Id == 42 && card.Account == "oldowner", "New public name did not find another active player's selected character");
-        var record = MagPublicIdentity.DisplayRecord(card, registry.PublicNameForOwner(card.Account, clock));
+        var record = MagPublicIdentity.DisplayRecord(card, publicNames[card.Account]);
         Check(StoredCharacter.DisplayNameFor(record.Name, record.NpId) == "NewPublic" && card.NpId.All(b => b == 0) && card.Name == "OldPublic!1", "Card display modified persisted identity");
         var foreign = registry.IssueForAccount("unrelated", 43, 1, clock, "NewPublic");
         Check(registry.TryBind(foreign.AccessToken, foreign.SessionKey, foreign.ApplicationId, 1, "ambiguous-player", clock, out _), "Ambiguous credential setup");
+        publicNames = registry.PublicNamesByOwner(clock);
         Check(MagMlsSession.FindCharacter(rows, new MagCharacterDataRequest { QueryKind = 1, AccountName = "NewPublic" },
-            id => true, owner => registry.PublicNameForOwner(owner, clock)) == null, "Ambiguous authenticated public name selected another owner");
+            id => true, publicNames) == null, "Ambiguous authenticated public name selected another owner");
         Check(registry.IssueForAccount("oldowner", 44, 1, clock, "bad\nname") == null, "Unsafe public identity reached credentials");
+    }
+    public static void PublicNameSnapshot()
+    {
+        var clock = DateTime.UtcNow;
+        var registry = new MagLoginRegistry();
+        Check(registry.PublicNamesByOwner(clock).Count == 0, "Legacy/off empty registry supplied public names");
+        var pending = registry.IssueForAccount("oldowner", 41, 1, clock, "NewPublic");
+        Check(registry.PublicNamesByOwner(clock).Count == 0, "Pending ticket replaced a live identity");
+        Check(registry.TryBind(pending.AccessToken, pending.SessionKey, pending.ApplicationId, 1, "snapshot-player", clock, out _), "Snapshot setup");
+        var snapshot = registry.PublicNamesByOwner(clock);
+        Check(snapshot.Count == 1 && snapshot["oldowner"] == "NewPublic", "Bound public identity missing from snapshot");
+        registry.Release("snapshot-player");
+        Check(snapshot["oldowner"] == "NewPublic" && registry.PublicNamesByOwner(clock).Count == 0,
+            "Captured public names changed during a request or released names remained live");
+        foreach (var pair in new[] { ("NewPublic", 42u), ("OldPublic", 43u) })
+        {
+            var ticket = registry.IssueForAccount("oldowner", pair.Item2, 1, clock, pair.Item1);
+            Check(registry.TryBind(ticket.AccessToken, ticket.SessionKey, ticket.ApplicationId, 1, pair.Item1, clock, out _), "Ambiguous snapshot setup");
+        }
+        Check(registry.PublicNamesByOwner(clock).Count == 0, "Conflicting bound identities were resolved arbitrarily");
+        Check(registry.PublicNamesByOwner(clock.AddSeconds(121)).Count == 0, "Expired identities remained in snapshot");
+        registry.IssueForAccount("legacy", 44, 1, clock);
+        Check(registry.PublicNamesByOwner(clock).Count == 0, "Legacy credentials enabled authenticated-name lookup");
     }
     public static void Configuration()
     {

@@ -30,26 +30,26 @@
 
 Own `portal/` only. Add migration `0009_player_names.sql`: immutable nullable `accounts.game_account_name` (lowercase, unique when named), `accounts.name_changed_at`, and owned historical-name reservations. Backfill existing named accounts; first claim assigns the owner once. Account deletion preserves required tombstones. The server cache reads `SELECT id, game_account_name FROM accounts WHERE player_name IS NOT NULL AND banned_at IS NULL`; preserve person and service accounts.
 
-- [ ] Write and observe failing DB/HTTP rename and ownership tests.
-- [ ] Implement authenticated CSRF rename controls, feature gate and 24-hour cooldown; keep device/ticket/OIDC flow unchanged.
-- [ ] Protect former names across ordinary claim, deletion, service creation and explicit administrative assignment/recovery.
-- [ ] Use immutable owners for game-admin and report joins while displaying current public names and retaining historical evidence.
-- [ ] Run complete portal tests, format and Clippy; document rollout and exact behavior.
+- [x] Write and observe failing DB/HTTP rename and ownership tests.
+- [x] Implement authenticated CSRF rename controls, feature gate and 24-hour cooldown; keep device/ticket/OIDC flow unchanged.
+- [x] Protect former names across ordinary claim, deletion, service creation and explicit administrative assignment/recovery.
+- [x] Use immutable owners for game-admin and report joins while displaying current public names and retaining historical evidence.
+- [x] Run complete portal tests, format and Clippy; document rollout and exact behavior.
 
 ### Task 2: Independent Medius owner lookup and public-name propagation
 
 Own `horizon/`. Add `MAG_PORTAL_ACCOUNT_LOOKUP=required` and `MAG_PORTAL_ACCOUNT_DB_CONNECTION_FILE`, independent from Sony configuration. Signed ticket account ID resolves to immutable owner using a bounded background-refreshed PostgreSQL snapshot; no DB I/O on service/world ticks. Unknown/stale mappings reject admission. Existing required/off behavior remains unchanged by default.
 
-- [ ] Write and observe failing policy/cache and different-name ownership tests.
-- [ ] Implement bounded owner cache and lifecycle/startup checks, preserving service accounts.
-- [ ] Carry signed public name separately through sessions/credentials/MLS/admission; validate incoming NP IDs against authenticated identity while preserving stored owner records.
-- [ ] Test backfill/database lookup, stale/outage handling, current and pre-rename tickets, and preserved character ownership/admission.
-- [ ] Run complete Linux server checks with throwaway PostgreSQL.
+- [x] Write and observe failing policy/cache and different-name ownership tests.
+- [x] Implement bounded owner cache and lifecycle/startup checks, preserving service accounts.
+- [x] Carry signed public name separately through sessions/credentials/MLS/admission; validate incoming NP IDs against authenticated identity while preserving stored owner records.
+- [x] Test backfill/database lookup, stale/outage handling, current and pre-rename tickets, and preserved character ownership/admission.
+- [x] Run complete Linux server checks with throwaway PostgreSQL.
 
 ### Task 3: Review, publication and CI
 
-- [ ] Review both source areas for ownership and race defects, fix with focused tests.
-- [ ] Run source-boundary and affected Python/Helm checks.
+- [x] Review both source areas for ownership and race defects, fix with focused tests.
+- [x] Run source-boundary and affected Python/Helm checks.
 - [ ] Commit/push the independent branch, open the separate main-targeted PR and watch CI to completion.
 
 PR 435 separately receives the console-name collision allocator and owner-scoped retry/login aliases; do not copy those changes into this branch.
