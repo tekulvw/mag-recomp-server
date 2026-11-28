@@ -532,6 +532,47 @@ pub(super) fn hit<W: Write>(
         "hit_authority":"client_reported",
         "collision_audit":collision_audit(ctx.engine.collision_world.as_ref(), ctx.engine.map_name(), request.hit_origin, request.hit_dest),
         "ammo_authority":"observed_only_no_fire_event"});
+    // Name the life state behind a refused hit so each refusal can be told
+    // apart: a late round on a body that already died, or a shooter the
+    // server holds down or dead while its client keeps firing.
+    if let Some(code @ ("bullet_target_not_alive" | "bullet_requires_living_armed_shooter")) =
+        plan.gameplay_denial
+    {
+        let target = if let Some(peer) = peer_target {
+            json!({"kind":"human","life":life_audit(peer.life, now)})
+        } else if let Some(bot) = registry_target {
+            let runtime = ctx
+                .engine
+                .bot_registry
+                .bots
+                .get(&bot.object_index)
+                .and_then(|b| b.target.runtime);
+            let life = if bot.health_quarter_points > 0 {
+                json!({"state":"alive","health_quarter_points":bot.health_quarter_points})
+            } else if let Some(down) = downed_bot {
+                json!({"state":"downed",
+                    "downed_for_ms":now.saturating_sub(down.at).as_millis() as u64,
+                    "expired":down.state.is_expired(now)})
+            } else {
+                json!({"state":"dead",
+                    "dead_for_ms":runtime.map(|r| now.saturating_sub(r.since).as_millis() as u64)})
+            };
+            json!({"kind":"bot","generation":bot.generation,"life":life})
+        } else {
+            json!({"kind":"other"})
+        };
+        let refusal = json!({"code":code,"target":target,"shooter":{
+            "entered_game":active.entered_game,
+            "ready_for_updates":active.ready_for_updates,
+            "life":life_audit(active.life, now),
+            "mounted_seat":active.mounted_seat,
+            "ground_seat":active.ground_seat.is_some(),
+            "ground_gunner":ground_gunner}});
+        audit
+            .as_object_mut()
+            .unwrap()
+            .insert("refusal".into(), refusal);
+    }
     if active.wire_profile.application_id() == 20231 {
         let audit = audit.as_object_mut().unwrap();
         if indexed_hospital || ground_gunner {
@@ -568,6 +609,27 @@ pub(super) fn hit<W: Write>(
         }
     }
     Ok(audit)
+}
+
+/// A character life for a refusal audit: its state, and for a downed life
+/// how long it still has before bleeding out.
+fn life_audit(life: CharacterLife, now: Duration) -> Value {
+    match life {
+        CharacterLife::AwaitingFirstSpawn => json!({"state":"awaiting_first_spawn"}),
+        CharacterLife::Alive {
+            generation,
+            health_quarter_points,
+        } => json!({"state":"alive","generation":generation,
+            "health_quarter_points":health_quarter_points}),
+        CharacterLife::Incapacitated { generation, downed } => {
+            json!({"state":"downed","generation":generation,
+                "bleeds_out_in_ms":downed.deadline.saturating_sub(now).as_millis() as u64,
+                "expired":downed.is_expired(now)})
+        }
+        CharacterLife::AwaitingRespawn { generation } => {
+            json!({"state":"dead","generation":generation})
+        }
+    }
 }
 
 pub(super) fn fire_grenade<W: Write>(
