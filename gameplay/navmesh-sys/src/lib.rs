@@ -33,8 +33,10 @@ unsafe extern "C" {
     pub fn mag_nav_destroy(handle: *mut std::ffi::c_void);
     /// A query context over a loaded mesh, which must outlive it. Each
     /// context holds its own search state; use one from one thread at a time.
-    pub fn mag_nav_query_new(mesh: *const std::ffi::c_void, node_limit: c_int)
-    -> *mut std::ffi::c_void;
+    pub fn mag_nav_query_new(
+        mesh: *const std::ffi::c_void,
+        node_limit: c_int,
+    ) -> *mut std::ffi::c_void;
     pub fn mag_nav_query_free(query: *mut std::ffi::c_void);
     /// Bytes Detour allocates for one query context of `node_limit` nodes.
     pub fn mag_nav_query_bytes(node_limit: c_int) -> usize;
