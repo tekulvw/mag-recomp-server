@@ -178,7 +178,13 @@ struct CombatChanges {
     new_life: Option<CharacterLife>,
     peer_lives: Vec<(String, CharacterLife)>,
     peer_damage: Vec<(String, u32, replication::CharacterDamage)>,
-    bot_damage: Vec<(u16, u32, replication::CharacterDamage)>,
+    /// Bot victims, with each one's planned downed state after the hit.
+    bot_damage: Vec<(
+        u16,
+        u32,
+        replication::CharacterDamage,
+        Option<incapacitation::Downed>,
+    )>,
     bot_firearm_kd: Option<bot_firearm_kd::Plan>,
     firearm_assists: Option<firearm_assists::Plan>,
     death_notifications: Vec<death_notifications::Plan>,
@@ -187,6 +193,7 @@ struct CombatChanges {
     vehicle_impact_notice: Option<death_notifications::CharacterEffectNotice>,
     new_damage_model: Option<replication::CharacterDamage>,
     revived_peer: Option<(String, u32, replication::CharacterDamage)>,
+    revived_bot: Option<(u16, u32, replication::CharacterDamage)>,
     new_healing: Option<Option<progression::HealingSession>>,
     peer_healing: Vec<(String, u32, progression::HealingSession)>,
     bot_healing: Vec<bot_healing::Received>,
@@ -964,13 +971,14 @@ impl<W: Write> Engine<W> {
                 self.commit_weapon_death(
                     plan.combat.death_notifications.remove(index),
                     damage,
+                    None,
                     now,
                 )?;
             } else if let Some(peer) = self.peers.get_mut(&id) {
                 peer.apply_peer_damage(generation, damage, now)?;
             }
         }
-        for (id, generation, damage) in plan.combat.bot_damage {
+        for (id, generation, damage, downed) in plan.combat.bot_damage {
             if let Some(index) = plan
                 .combat
                 .death_notifications
@@ -980,14 +988,19 @@ impl<W: Write> Engine<W> {
                 self.commit_weapon_death(
                     plan.combat.death_notifications.remove(index),
                     damage,
+                    downed,
                     now,
                 )?;
             } else {
-                self.commit_bot_damage(id, generation, damage, now)?;
+                self.commit_planned_bot_damage(id, generation, damage, downed, now)?;
             }
         }
         if let Some(kd) = plan.combat.bot_firearm_kd {
             kd.install(self)?;
+        }
+        if let Some((id, generation, damage)) = plan.combat.revived_bot {
+            // Publishes the bot's restored damage and standing state.
+            self.commit_bot_revive(id, generation, damage, now)?;
         }
         if let Some((id, generation, damage)) = plan.combat.revived_peer {
             let peer = self.peers.get_mut(&id).ok_or("stale_revive_patient")?;

@@ -180,10 +180,72 @@ embedded in source. If an optional action award is absent, the recognized event
 settles durably with no XP so it cannot poison the reward outbox. Unknown reward
 kinds remain invalid.
 
-This implementation admits **human patients**, including humans injured by
-server-owned bot weapons. Server-owned bots remain terminal-only patients until
-their authoritative recovery publication and AI transitions are implemented.
-Mounted human death, server-side revive targeting/range/LOS and charge/cooldown
+This implementation admits human patients, including humans injured by
+server-owned bot weapons, and world-owned bots (below). Mounted human death, server-side revive targeting/range/LOS and charge/cooldown
 policy remain separate work; this handler does not invent them from the request.
 Synthetic tests establish transaction, routing and lifecycle behavior. A bounded
 native two-human revive/bleed-out test remains the client-acceptance follow-up.
+
+## Downed bots
+
+World-owned bots go down under the same rules as humans when
+`--incapacitation-rules` is supplied: an eligible lethal hit below the
+threshold downs them, and a lethal KineticResponse hit (grenades, rockets)
+is final. Bots own no skills, so their downed time is the authored one. The
+bot keeps its body and life, publishes the same field8 as a downed human (zero
+health, condition bit 2) with the death state 7, and late joiners receive that
+state in its snapshot. While downed it cannot move, fire, heal, take a passage
+or be targeted, and it does not join a respawn wave.
+
+- **Finishing:** later hits add to the separate finishing budget with the
+  incapacitated body multipliers. Reaching the threshold finishes the bot; a
+  human finisher on the other side records `EnemyFinished` and statistic 24.
+  As for humans, the kill, the kill-feed notice, `EnemyKilled` and the bot's
+  firearm K/D belong to the hit that downed it; finishing adds none of them.
+  Bots never aim at a body at zero health, so they do not finish downed
+  characters.
+- **Human revive:** `Resuscitate` naming a downed bot on the healer's side is
+  accepted under the human conditions (living on-foot healer, unexpired
+  downed time, positive `kCharModResuscitatePercent`). The restore is the
+  healer's maximum health times that modifier, capped at the bot's maximum.
+  Both squads hear the notice, and the healer records statistic 34 and the
+  `TeammateResuscitated` XP, except when the downing hit came from the
+  healer's own side. The server owns the bot, so it publishes the recovery
+  itself: the restored field8 with the ordinary standing state. The bot keeps
+  its life and position and resumes its AI from there. A second collapse in
+  that life is a new kill.
+- **Bot revive:** a bot medic revives a downed bot teammate inside its
+  medkit's reach, as it revives a downed human (see
+  [bot-healing.md](bot-healing.md)).
+- **Bleed-out:** the world clock ends a downed bot life at the authored
+  deadline. Bots never press Bleed out, so a bot also gives up when no medic
+  can help: `medic_check_delay_ms` (10 s) after it went down it looks for a
+  friendly medic within `medic_radius_m` (30 m, straight-line). A medic is a
+  living, on-foot, not downed character on its side that can revive: a human
+  carrying the medkit with a positive `kCharModResuscitatePercent`, or a bot
+  carrying the medkit while bot revives are on. With none, the bot bleeds out
+  at once. With one, it checks again every `medic_recheck_ms` (1 s) and bleeds
+  out at the first check that finds none, never later than the authored
+  deadline. A bleed-out publishes the downing attribution with the downed
+  condition bits cleared, as a human give-up does, and the bot joins the first
+  team wave after the bleed-out (`bot_bled_out`, with the reason
+  `no_medic_in_range` or `expired`). Bots have no client still playing a
+  death, so the respawn queue cutoff (see [respawn-queue.md](respawn-queue.md))
+  does not apply to them.
+
+The population file's `incapacitation` object configures this; omitted fields
+use the defaults:
+
+```json
+{
+  "enabled": true,
+  "medic_check_delay_ms": 10000,
+  "medic_recheck_ms": 1000,
+  "medic_radius_m": 30.0
+}
+```
+
+`"enabled": false` keeps every bot death terminal. Bot falls stay terminal.
+Whether the original client offers its revive prompt on a server-owned body
+has not been observed yet; it needs a lab check with a human medic who owns
+the resuscitation skill.

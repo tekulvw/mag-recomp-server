@@ -118,6 +118,7 @@ impl<W: Write> Engine<W> {
                 due.push((victim.reservation.id.clone(), generation, damage, packet));
             }
         }
+        self.tick_bot_incapacitation(now, wall)?;
         if due.is_empty() {
             return Ok(());
         }

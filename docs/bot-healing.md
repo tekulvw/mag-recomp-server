@@ -31,8 +31,8 @@ sphere in the retail combat catalog (the medkit). Its sphere sits
     healed, receives the item's healing effect, built with the human
     healing rules (`received_bot_healing_tick` for bots; a human's own
     healing ticks for humans);
-  - a downed human teammate is revived when `revive` is on and the match
-    has incapacitation rules.
+  - a downed human or bot teammate is revived when `revive` is on and the
+    match has incapacitation rules.
 - **Combat:** a medic whose weapon holds an enemy only uses the item for a
   teammate at or below 40% health or downed.
 - **Cooldown:** one use starts the item's authored cooldown, and each patient
@@ -71,7 +71,7 @@ default kit and self-healing only.
 
 `bot_teammate_healing_started` records the medic, item, sphere centre and
 radius, whether it was fighting, whether it treated itself, and each patient
-(`bot`, `human` or `revived`, with health before).
+(`bot`, `human`, or `revived` or `revived_bot` with the restored health).
 
 Headless bot-only runs, with private inputs and deterministic:
 
@@ -87,6 +87,8 @@ no human teammates.
 
 ## Not implemented
 
-- Medics do not walk to injured teammates. They treat whoever is within
-  reach of their sphere, typically squadmates sharing an objective position.
-- Bots are never downed, so only humans are revived.
+- Medics do not walk to injured or downed teammates. They treat whoever is
+  within reach of their sphere, typically squadmates sharing an objective
+  position. A downed bot near a bot medic waits for it (see "Downed bots" in
+  [incapacitation.md](incapacitation.md)), so it is revived only if the
+  medic's own task brings it into reach.

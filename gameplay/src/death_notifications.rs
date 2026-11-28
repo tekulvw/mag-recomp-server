@@ -206,10 +206,13 @@ impl<W: Write> Engine<W> {
 
     /// Caller must record Plan::audit before invoking this method. Existing
     /// human/bot terminal guards are the authority for exactly-once publication.
+    /// `downed` is a bot victim's planned downed state (see
+    /// `plan_bot_damage`); a human victim's life is committed separately.
     pub(super) fn commit_weapon_death(
         &mut self,
         plan: Plan,
         damage: replication::CharacterDamage,
+        downed: Option<incapacitation::Downed>,
         now: Duration,
     ) -> Result<(), &'static str> {
         if damage.health_quarter_points != 0
@@ -233,7 +236,13 @@ impl<W: Write> Engine<W> {
                 .ok_or("stale_firearm_death")?;
             victim.apply_peer_damage(plan.victim.generation, damage, now)?;
         } else {
-            self.commit_bot_damage(plan.victim.id, plan.victim.generation, damage, now)?;
+            self.commit_planned_bot_damage(
+                plan.victim.id,
+                plan.victim.generation,
+                damage,
+                downed,
+                now,
+            )?;
         }
         // Current human members of the union of the two actual squads. Iterating
         // actual sessions once deduplicates identical squads and excludes bots.

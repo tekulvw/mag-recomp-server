@@ -102,7 +102,8 @@ fn apply<W: Write>(
                 .find(|bot| {
                     engine.is_registry_bot(bot.object_index)
                         && 0x0380_0000 | u32::from(bot.object_index) == report.defender
-                        && bot.health_quarter_points > 0
+                        && (bot.health_quarter_points > 0
+                            || engine.bot_revivable(bot.object_index, ctx.now).is_some())
                 })
                 .map(Victim::Bot)
         })
@@ -151,12 +152,24 @@ fn apply<W: Write>(
         audit["outcome"] = json!("no_damage");
         return Ok(());
     };
-    let damage = impact.damage;
-    let lethal = damage.health_quarter_points == 0;
+    let mut damage = impact.damage;
     let mut life = None;
     if let Victim::Human(peer) = &victim {
         let (model, next) = engine.plan_human_damage(peer, impact.amount, damage, ctx.now)?;
         life = Some((model, next));
+    }
+    // A downed bot takes finishing damage; its kill belongs to the down.
+    let mut bot_downed = None;
+    let mut bot_finished = false;
+    let mut lethal = damage.health_quarter_points == 0;
+    if let Victim::Bot(bot) = &victim {
+        let was_downed = engine.bot_revivable(bot.object_index, ctx.now).is_some();
+        let (model, downed) =
+            engine.plan_bot_damage(bot.object_index, impact.amount, damage, ctx.now)?;
+        damage = model;
+        bot_downed = downed;
+        bot_finished = was_downed && downed.is_none();
+        lethal = lethal && bot.health_quarter_points > 0;
     }
     let bot_kd = match &victim {
         Victim::Bot(bot) if lethal && engine.match_terminal.is_none() => {
@@ -177,6 +190,7 @@ fn apply<W: Write>(
     let damage = life.map_or(damage, |(model, _)| model);
     let notice = match &victim {
         Victim::Human(peer) if !peer.life.is_alive() => None,
+        Victim::Bot(bot) if bot.health_quarter_points == 0 => None,
         _ if !lethal => None,
         _ => Some(engine.plan_vehicle_impact_death_notice(
             world,
@@ -192,7 +206,7 @@ fn apply<W: Write>(
             now_ms as u32,
             report.defender as u16,
             damage,
-            lethal,
+            damage.health_quarter_points == 0,
         )
         .encode_with_profile(engine.wire_profile)?;
 
@@ -229,14 +243,36 @@ fn apply<W: Write>(
         Victim::Bot(bot) => {
             plan.combat
                 .bot_damage
-                .push((bot.object_index, bot.generation, damage));
+                .push((bot.object_index, bot.generation, damage, bot_downed));
+            if bot_finished {
+                statistics::finished(plan, active, bot.team);
+                if active.team() != bot.team
+                    && let Some(recipient) = progression::RewardRecipient::from_active(active)
+                {
+                    plan.combat.new_rewards.push(recipient.event(
+                        format!(
+                            "finish-{}-bot-{:04x}-{:08x}-{}",
+                            active.reservation.id,
+                            bot.object_index,
+                            bot.generation,
+                            ctx.next_sequence
+                        ),
+                        progression::RewardKind::EnemyFinished,
+                        1,
+                    ));
+                }
+            }
             if lethal {
                 statistics::target_killed(plan, active, bot.team);
                 if active.team() != bot.team
                     && let Some(recipient) = progression::RewardRecipient::from_active(active)
                 {
                     let reward = engine.frago_combat_reward(
-                        recipient.bot_killed(bot.object_index, bot.generation),
+                        recipient.bot_killed_collapse(
+                            bot.object_index,
+                            bot.generation,
+                            engine.bot_revivals(bot.object_index),
+                        ),
                         active,
                         Some(crate::frago::point(bot.position)),
                         plan.frago_frame(engine),
@@ -309,6 +345,9 @@ fn resolve<W: Write>(
         ))?;
     let armor = match victim {
         Victim::Human(peer) if matches!(peer.life, CharacterLife::Incapacitated { .. }) => {
+            armor.for_incapacitated(catalog)?
+        }
+        Victim::Bot(bot) if engine.bot_revivable(bot.object_index, ctx.now).is_some() => {
             armor.for_incapacitated(catalog)?
         }
         _ => armor,

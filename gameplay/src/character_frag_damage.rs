@@ -140,14 +140,21 @@ impl<W: Write> Engine<W> {
                         .get(&(target.character_id as u16))
                         .filter(|bot| {
                             bot.target.runtime.is_some_and(|runtime| {
-                                runtime.generation == target.generation && bot.health > 0
+                                runtime.generation == target.generation
+                                    && (bot.health > 0 || bot.downed.is_some())
                             })
                         })
                         .ok_or("missing_target_loadout")?;
+                    let armor =
+                        armor::ArmorProfile::from_retail_loadout(&bot.target.loadout, catalog)?;
                     (
                         None,
                         FragTargetAllocation::Bot(bot.allocation_generation),
-                        armor::ArmorProfile::from_retail_loadout(&bot.target.loadout, catalog)?,
+                        if bot.downed.is_some() {
+                            armor.for_incapacitated(catalog)?
+                        } else {
+                            armor
+                        },
                     )
                 };
                 let raw = armor::native_character_blast_damage(

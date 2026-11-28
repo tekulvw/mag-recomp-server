@@ -80,14 +80,17 @@ fn reserve(engine: &mut Engine<Vec<u8>>, player: u16) {
     assert!(response.ok, "{:?}", response.error);
 }
 
-fn with_item(mut kit: replication::CharacterLoadout, item: u16) -> replication::CharacterLoadout {
+pub(crate) fn with_item(
+    mut kit: replication::CharacterLoadout,
+    item: u16,
+) -> replication::CharacterLoadout {
     kit.inventories[usize::from(kit.handle.inventory_index)].slots[5] = Some(item);
     kit
 }
 
 /// One human, a medic bot at the origin and bots placed by `others`
 /// (index offset, team, position, health), all standing on the floor.
-fn world(others: &[(u16, u8, [f32; 3], u16)]) -> (Engine<Vec<u8>>, u16) {
+pub(crate) fn world(others: &[(u16, u8, [f32; 3], u16)]) -> (Engine<Vec<u8>>, u16) {
     let mut engine = crate::bot_registry::identity_tests::engine("Synthetic Medic");
     reserve(&mut engine, 0);
     ready(engine.active.as_mut().unwrap());
@@ -131,7 +134,7 @@ fn world(others: &[(u16, u8, [f32; 3], u16)]) -> (Engine<Vec<u8>>, u16) {
     (engine, medic)
 }
 
-fn records(engine: &Engine<Vec<u8>>, op: &str) -> Vec<Value> {
+pub(crate) fn records(engine: &Engine<Vec<u8>>, op: &str) -> Vec<Value> {
     String::from_utf8_lossy(&engine.writer)
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())

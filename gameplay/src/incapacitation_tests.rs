@@ -13,7 +13,7 @@ pub(crate) fn rules() -> incapacitation::Rules {
     }
 }
 
-fn modifiers(restore: f32, health_bonus: f32) -> skill_catalog::OwnedModifiers {
+pub(crate) fn modifiers(restore: f32, health_bonus: f32) -> skill_catalog::OwnedModifiers {
     let catalog = skill_catalog::SkillCatalog::from_value(json!({
         "schema_version":2,"application_id":20231,
         "table":{"Skills":{
@@ -83,7 +83,7 @@ fn down_patient(engine: &mut Engine<Vec<u8>>, now: Duration) {
     patient.life = life;
 }
 
-fn request(patient: u32) -> Vec<u8> {
+pub(crate) fn request(patient: u32) -> Vec<u8> {
     let mut bytes = 0x021cu16.to_be_bytes().to_vec();
     bytes.extend(patient.to_be_bytes());
     bytes

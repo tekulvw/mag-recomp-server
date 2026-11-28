@@ -331,9 +331,8 @@ fn unsupported_reports_stay_visible() {
     assert!(victim(&engine).life.is_alive());
 }
 
-#[test]
-fn a_registered_bot_is_a_victim_too() {
-    let mut engine = scene(2, 400);
+/// One synthetic registry bot on the other side from the driver, at full health.
+fn place_enemy_bot(engine: &mut Engine<Vec<u8>>) -> u16 {
     // Borrow one synthetic registry bot from the bot fixture world.
     let mut bots = crate::bot_registry::identity_tests::engine("Synthetic Impact Bot");
     let response = bots.handle(
@@ -359,13 +358,21 @@ fn a_registered_bot_is_a_victim_too() {
         .unwrap();
     let (&index, bot) = bots.bot_registry.bots.iter().next().unwrap();
     let mut bot = bot.clone();
-    let kit = actor(&mut engine, 1).equipped_loadout().unwrap();
+    let kit = actor(engine, 1).equipped_loadout().unwrap();
     bot.target.loadout = kit;
     // The other side from the driver.
     bot.target.squad = replication::SquadAddress::from_index(16).unwrap();
     bot.health = 400;
     bot.damage.health_quarter_points = 400;
     engine.bot_registry.bots.insert(index, bot);
+    engine.bot_registry.config = bots.bot_registry.config.clone();
+    index
+}
+
+#[test]
+fn a_registered_bot_is_a_victim_too() {
+    let mut engine = scene(2, 400);
+    let index = place_enemy_bot(&mut engine);
     report(&mut engine, 1, APC, 0x0380_0000 | u32::from(index), 950);
     let event = last_event(&engine);
     assert_eq!(event["gameplay_denial"], Value::Null, "{event}");
@@ -378,4 +385,49 @@ fn a_registered_bot_is_a_victim_too() {
     let driver = engine.active.as_ref().unwrap();
     assert_eq!(driver.reward_statistics.get(&10), Some(&1));
     assert!(!event["decoded"]["death_notice"].is_null());
+}
+
+#[test]
+fn a_lethal_impact_downs_a_bot_and_a_second_one_finishes_it() {
+    let mut engine = scene(2, 400)
+        .with_incapacitation_rules(incapacitation::Rules {
+            schema_version: 1,
+            incapacitated_damage_threshold_hp: 150.0,
+            incapacitated_duration_seconds: 30.0,
+            excluded_character_states: vec![],
+            provenance: None,
+        })
+        .unwrap();
+    let index = place_enemy_bot(&mut engine);
+    report(&mut engine, 1, APC, 0x0380_0000 | u32::from(index), 950);
+    let bot = &engine.bot_registry.bots[&index];
+    assert_eq!(bot.health, 0);
+    assert!(bot.downed.is_some(), "120 HP is below the 150 HP threshold");
+    assert_eq!(bot.damage.conditions & 2, 2);
+    let driver = engine.active.as_ref().unwrap();
+    assert_eq!(
+        driver.reward_statistics.get(&10),
+        Some(&1),
+        "the kill is the down"
+    );
+    // Finishing damage builds up separately: 120 HP, then 240 HP.
+    report(&mut engine, 1, APC, 0x0380_0000 | u32::from(index), 960);
+    assert!(engine.bot_registry.bots[&index].downed.is_some());
+    report(&mut engine, 1, APC, 0x0380_0000 | u32::from(index), 970);
+    let event = last_event(&engine);
+    assert_eq!(event["gameplay_denial"], Value::Null, "{event}");
+    assert!(
+        event["decoded"]["death_notice"].is_null(),
+        "no second notice"
+    );
+    let bot = &engine.bot_registry.bots[&index];
+    assert!(bot.downed.is_none());
+    assert_eq!(bot.damage.conditions & 2, 0);
+    let driver = engine.active.as_ref().unwrap();
+    assert_eq!(
+        driver.reward_statistics.get(&10),
+        Some(&1),
+        "no second kill"
+    );
+    assert_eq!(driver.reward_statistics.get(&24), Some(&1), "a finish");
 }

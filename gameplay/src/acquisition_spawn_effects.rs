@@ -360,7 +360,8 @@ impl<W: Write> Engine<W> {
         {
             return Err("stale_acquisition_character_generation");
         }
-        Ok(bot.health == 0)
+        // A downed bot, like a downed human, is not yet dead.
+        Ok(bot.health == 0 && bot.downed.is_none())
     }
     pub(crate) fn acquisition_character_position(
         &self,

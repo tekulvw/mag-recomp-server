@@ -36,6 +36,8 @@ pub struct BotPopulation {
     #[serde(default)]
     pub healing: crate::bot_healing::Policy,
     #[serde(default)]
+    pub incapacitation: crate::bot_incapacitation::Policy,
+    #[serde(default)]
     pub perception: crate::bot_perception::Policy,
     #[serde(default)]
     pub cover: crate::bot_cover::Policy,
@@ -93,6 +95,7 @@ impl BotPopulation {
         }
         self.firearms.validate()?;
         self.healing.validate()?;
+        self.incapacitation.validate()?;
         self.perception.validate()?;
         self.cover.validate()?;
         self.repair.validate()?;
@@ -231,6 +234,10 @@ pub(super) struct WorldBot {
     pub(super) resupply_planning_retry_at: Duration,
     pub(super) healing: crate::bot_healing::State,
     pub(super) received_healing: Option<crate::bot_healing::Received>,
+    /// Set while this life is downed (health 0, waiting for a medic).
+    pub(super) downed: Option<crate::bot_incapacitation::BotDowned>,
+    /// Revivals in this life; a later collapse is a new kill.
+    pub(super) revivals: u32,
     /// The spawn point this life started at, when it used one.
     pub(super) life_spawn: Option<u16>,
     pub(super) move_attempted: bool,
@@ -1368,6 +1375,9 @@ impl<W: Write> Engine<W> {
         self.broadcast_bot_state_packet(id, packet);
         Ok(())
     }
+    /// Commit terminal or ordinary damage to a living bot. Damage planned
+    /// with [`Self::plan_bot_damage`] commits its downed outcome through
+    /// [`Self::commit_planned_bot_damage`] instead.
     pub(crate) fn commit_bot_damage(
         &mut self,
         id: u16,
@@ -1375,17 +1385,54 @@ impl<W: Write> Engine<W> {
         damage: replication::CharacterDamage,
         now: Duration,
     ) -> Result<(), &'static str> {
+        self.commit_planned_bot_damage(id, generation, damage, None, now)
+    }
+    /// `downed` is the bot's downed state after this hit, as planned: `Some`
+    /// for a hit that downs it or a downed hit that does not finish it.
+    pub(crate) fn commit_planned_bot_damage(
+        &mut self,
+        id: u16,
+        generation: u32,
+        damage: replication::CharacterDamage,
+        downed: Option<incapacitation::Downed>,
+        now: Duration,
+    ) -> Result<(), &'static str> {
         if let Some(bot) = self.bot_registry.bots.get_mut(&id) {
             let mut runtime = bot.target.runtime.ok_or("bot_runtime_missing")?;
             if runtime.generation != generation
-                || bot.health == 0
+                || (bot.health == 0 && bot.downed.is_none())
                 || damage.health_quarter_points > bot.health
+                || (downed.is_some() != (damage.conditions & 2 != 0))
+                || (downed.is_some() && damage.health_quarter_points != 0)
             {
                 return Err("stale_bot_damage");
             }
+            if let Some(current) = bot.downed.as_mut() {
+                // Hits on a downed body only finish it or add to its budget.
+                bot.damage = damage;
+                match downed {
+                    Some(next) => current.state = next,
+                    None => {
+                        bot.downed = None;
+                        runtime.since = now;
+                        runtime.last_update = now;
+                    }
+                }
+                bot.target.runtime = Some(runtime);
+                return Ok(());
+            }
+            let motion = runtime.physics_motion;
             bot.apply_damage_health(damage.health_quarter_points);
             bot.damage = damage;
             if bot.health == 0 {
+                bot.downed = downed.map(|state| {
+                    crate::bot_incapacitation::BotDowned::new(
+                        state,
+                        now,
+                        motion,
+                        &self.bot_registry.config,
+                    )
+                });
                 bot.firearm = Default::default();
                 bot.resupply = None;
                 bot.resupply_seek = None;
@@ -1584,14 +1631,15 @@ impl<W: Write> Engine<W> {
     /// The wave deadline a dead bot's next life is due at, once reached.
     /// Once a dead life reaches its wave, the deadline is retained through an
     /// occupied spawn and the team's clock rollover.
-    fn due_bot_respawn(
+    pub(crate) fn due_bot_respawn(
         &self,
         id: u16,
         now: Duration,
         respawn_delays: [u32; 2],
     ) -> Result<Option<Duration>, &'static str> {
         let bot = &self.bot_registry.bots[&id];
-        if bot.health != 0 {
+        // A downed bot joins its wave only once it bleeds out or is finished.
+        if bot.health != 0 || bot.downed.is_some() {
             return Ok(None);
         }
         let runtime = bot.target.runtime.ok_or("bot_runtime_missing")?;
@@ -1854,6 +1902,8 @@ impl<W: Write> Engine<W> {
                 bot.resupply_planning_retry_at = Duration::ZERO;
                 bot.healing = Default::default();
                 bot.received_healing = None;
+                bot.downed = None;
+                bot.revivals = 0;
                 bot.life_spawn = spawn.spawn_point;
                 bot.damage = initial_damage();
                 bot.move_attempted = false;
@@ -3772,6 +3822,8 @@ impl<W: Write> Engine<W> {
                     resupply_planning_retry_at: Duration::ZERO,
                     healing: Default::default(),
                     received_healing: None,
+                    downed: None,
+                    revivals: 0,
                     life_spawn: spawn.spawn_point,
                     move_attempted: false,
                     due_respawn_wave: None,
