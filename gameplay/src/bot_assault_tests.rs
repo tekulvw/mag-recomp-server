@@ -306,3 +306,23 @@ fn a_squad_without_living_bots_keeps_its_wave() {
         }
     );
 }
+
+#[test]
+fn the_documented_population_object_is_the_default_and_unknown_fields_are_refused() {
+    let documented: Policy = serde_json::from_value(serde_json::json!({
+        "enabled": true, "game_types": [2], "hold_radius_m": [2.5, 7.0],
+        "stage_hold_squads": 1, "rally_back_m": 35.0, "rally_radius_m": 12.0,
+        "rally_share": 0.6, "rally_wait_ms": 20000
+    }))
+    .unwrap();
+    assert_eq!(documented, Policy::default());
+    let partial: Policy = serde_json::from_value(serde_json::json!({"enabled": false})).unwrap();
+    assert_eq!(
+        partial,
+        Policy {
+            enabled: false,
+            ..Policy::default()
+        }
+    );
+    assert!(serde_json::from_value::<Policy>(serde_json::json!({"rally_m": 3.0})).is_err());
+}
