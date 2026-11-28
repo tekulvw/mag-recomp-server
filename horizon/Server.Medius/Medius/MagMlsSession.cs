@@ -9,6 +9,7 @@ namespace Server.Medius
 {
     public sealed class MagMlsSession
     {
+        public uint WireProtocolVersion { get; } = Program.Settings.MagProtocolVersion;
         public enum SessionState { Unbound, Bound, Accepted, TransportReady, ProtocolSent, Ready }
         public SessionState State { get; private set; }
         public bool IsBound => State != SessionState.Unbound;
@@ -52,21 +53,21 @@ namespace Server.Medius
             if (!IsBound || IsExpired(now) || !envelope.IsValid) return Array.Empty<RT_MSG_SERVER_PLUGIN_TO_APP>();
             if (!MagPluginRouting.IsClientPluginId(ApplicationId, envelope.PluginId))
             { LastRefusal = $"unexpected-plugin-id={envelope.PluginId}"; return Array.Empty<RT_MSG_SERVER_PLUGIN_TO_APP>(); }
-            if (MagRetailClanCodec.TryReadClanType(envelope.Payload, ApplicationId, out var clanType))
+            if (WireProtocolVersion != 1793 && MagRetailClanCodec.TryReadClanType(envelope.Payload, ApplicationId, out var clanType))
                 return HandleClan(envelope.Payload, clanType, now);
-            if (!MagMessageCodec.TryParseClientForApplication(envelope.Payload, ApplicationId, out var message))
+            if (!MagPluginRouting.TryParseClient(envelope.Payload, ApplicationId, WireProtocolVersion, out var message))
             { LastRefusal = "unknown-or-malformed-type"; return Array.Empty<RT_MSG_SERVER_PLUGIN_TO_APP>(); }
             if (message is MagHello && State == SessionState.TransportReady)
             {
                 State = SessionState.ProtocolSent; ObserveActivity(now);
-                return new[] { MagPluginRouting.ToMlsClient(new MagProtocolInfo { ProtocolVersion = Program.Settings.MagProtocolVersion, BuildNumber = 0 }, ApplicationId) };
+                return new[] { MagPluginRouting.ToMlsClient(new MagProtocolInfo { ProtocolVersion = WireProtocolVersion, BuildNumber = 0 }, ApplicationId, WireProtocolVersion) };
             }
-            if (message is MagProtocolInfo protocol && State == SessionState.ProtocolSent && protocol.ProtocolVersion == Program.Settings.MagProtocolVersion)
+            if (message is MagProtocolInfo protocol && State == SessionState.ProtocolSent && protocol.ProtocolVersion == WireProtocolVersion)
                 State = SessionState.Ready;
             if (message is MagKeepAlive && ApplicationId == 20231 && State == SessionState.Ready)
             {
                 ObserveActivity(now);
-                return new[] { MagPluginRouting.ToMlsClient(new MagKeepAlive(), ApplicationId) };
+                return new[] { MagPluginRouting.ToMlsClient(new MagKeepAlive(), ApplicationId, WireProtocolVersion) };
             }
             if (message is MagRetailAccountLogoutRequest logout && ApplicationId == 20231 && State == SessionState.Ready)
             {
@@ -75,7 +76,7 @@ namespace Server.Medius
                 // on this channel until it closes, and the channel close releases the ticket.
                 StorageStatus = "account-logout-acknowledged";
                 ObserveActivity(now);
-                return new[] { MagPluginRouting.ToMlsClient(new MagRetailAccountLogoutResponse { TransactionId = logout.TransactionId, Success = true }, ApplicationId) };
+                return new[] { MagPluginRouting.ToMlsClient(new MagRetailAccountLogoutResponse { TransactionId = logout.TransactionId, Success = true }, ApplicationId, WireProtocolVersion) };
             }
             if (message is MagTrainingCompletedRequest && ApplicationId == 20231 && State == SessionState.Ready)
             {
@@ -90,7 +91,7 @@ namespace Server.Medius
                         if (outcome.Result == MagNetResult.Success)
                         {
                             ObserveActivity(now);
-                            return new[] { MagPluginRouting.ToMlsClient(new MagCharacterRecordNotification { Record = outcome.Record }, ApplicationId) };
+                            return new[] { MagPluginRouting.ToMlsClient(new MagCharacterRecordNotification { Record = outcome.Record }, ApplicationId, WireProtocolVersion) };
                         }
                     }
                 }
@@ -120,7 +121,7 @@ namespace Server.Medius
                 catch (Exception e) when (e is IOException || e is InvalidDataException || e is UnauthorizedAccessException)
                 { StorageStatus = "skill-storage-error-no-success"; }
                 ObserveActivity(now);
-                return new[] { MagPluginRouting.ToMlsClient(response, ApplicationId) };
+                return new[] { MagPluginRouting.ToMlsClient(response, ApplicationId, WireProtocolVersion) };
             }
             if (message is MagRetailSkillRespecRequest && ApplicationId == 20231 && State == SessionState.Ready)
             {
@@ -150,7 +151,7 @@ namespace Server.Medius
                 catch (Exception e) when (e is IOException || e is InvalidDataException || e is UnauthorizedAccessException)
                 { StorageStatus = "respec-storage-error-no-success"; }
                 ObserveActivity(now);
-                return new[] { MagPluginRouting.ToMlsClient(response, ApplicationId) };
+                return new[] { MagPluginRouting.ToMlsClient(response, ApplicationId, WireProtocolVersion) };
             }
             if (message is MagRetailNominationsUpdate nominations && State == SessionState.Ready)
             {
@@ -189,7 +190,7 @@ namespace Server.Medius
                 catch (Exception e) when (e is IOException || e is InvalidDataException || e is UnauthorizedAccessException)
                 { StorageStatus = "character-data-storage-error"; }
                 ObserveActivity(now);
-                return new[] { MagPluginRouting.ToMlsClient(response, ApplicationId) };
+                return new[] { MagPluginRouting.ToMlsClient(response, ApplicationId, WireProtocolVersion) };
             }
             if (message is MagRetailPlayerOnlineRequest online && State == SessionState.Ready)
             {
@@ -198,7 +199,7 @@ namespace Server.Medius
                 bool isOnline = online.AccountId != 0 && (online.AccountId == AccountId || _registry.IsAccountOnline(online.AccountId, now));
                 StorageStatus = $"player-online={(isOnline ? "yes" : "no")}/account={online.AccountId}/session={AccountId}";
                 ObserveActivity(now);
-                return new[] { MagPluginRouting.ToMlsClient(new MagRetailPlayerOnlineResponse { AccountId = online.AccountId, Online = isOnline }, ApplicationId) };
+                return new[] { MagPluginRouting.ToMlsClient(new MagRetailPlayerOnlineResponse { AccountId = online.AccountId, Online = isOnline }, ApplicationId, WireProtocolVersion) };
             }
             if (message is MagRetailPlayerGameInfoRequest gameInfo && State == SessionState.Ready)
             {
@@ -206,7 +207,7 @@ namespace Server.Medius
                 // values of unknown meaning), so every account is reported as not in a game.
                 StorageStatus = $"player-game-info-not-in-game/account={gameInfo.AccountId}/session={AccountId}";
                 ObserveActivity(now);
-                return new[] { MagPluginRouting.ToMlsClient(MagRetailPlayerGameInfoResponse.NotInGame(gameInfo.AccountId), ApplicationId) };
+                return new[] { MagPluginRouting.ToMlsClient(MagRetailPlayerGameInfoResponse.NotInGame(gameInfo.AccountId), ApplicationId, WireProtocolVersion) };
             }
             if (State == SessionState.Ready && message is (MagLoadoutUpdateRequest or MagRetailLoadoutDeleteRequest))
             {
@@ -241,7 +242,7 @@ namespace Server.Medius
                 MagMessage response = deleting
                     ? new MagRetailLoadoutDeleteResponse { Success = success }
                     : new MagLoadoutUpdateResponse { Success = success };
-                return new[] { MagPluginRouting.ToMlsClient(response, ApplicationId) };
+                return new[] { MagPluginRouting.ToMlsClient(response, ApplicationId, WireProtocolVersion) };
             }
             ObserveActivity(now); return Array.Empty<RT_MSG_SERVER_PLUGIN_TO_APP>();
         }

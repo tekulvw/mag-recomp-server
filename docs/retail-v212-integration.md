@@ -47,10 +47,24 @@ checks does not establish native 2.12 compatibility.
 
 ## Current readiness and deployment handoff
 
-The first increment supplies an **offline patch codec only**:
-`MagPatch212Codec.TryParseRequest` and `NoDownloadReply`. Session handlers still
-use their original codec. Do not activate protocol 1793 or a 2.12 world from
-this increment. No game or service launch was part of its validation.
+The current source adds an explicitly configured protocol1793 session path for
+MAPS patch completion, authentication, character slots/creation, MAS character
+login/data, and the MLS protocol/keepalive/logout handshake. Each connection pins
+its protocol before its initial reply. The legacy application APIs/defaults stay
+unchanged. The selected IDs and changed character-field widths were checked
+against the exact2.12 engine; the source includes only independently written
+code and selected protocol constants, with raw analysis kept private.
+
+Synthetic checks cover both required signed portal tickets and explicit local
+development names, three empty/unlocked slots, named-slot creation, login,
+record extensions, wrong IDs/profiles, truncated fields, and profile pinning
+through config reload. New record extension values default to zero as explicit
+local policy; their meanings and accepted native defaults remain unknown.
+
+**This is not native-client acceptance or a gameplay activation contract.**
+Queue/status/clan/party wire formats remain unimplemented under1793, and no old
+codec fallback is allowed for them. A qualified2.12 character catalog set and
+client boot readiness are still required before any live acceptance run.
 
 The homelab chat owns the separate `mag-212` test deployment and its own storage,
 private DNS, portal audience/status and network policy matching modes. Existing
@@ -58,11 +72,21 @@ accounts, services and mutable stores remain separate. Recomp owns native
 launcher/engine readiness. Coordinate credentials through the existing secret
 workflow, never source commits or public PR bodies.
 
-Next activation contract requires explicit process/session profile selection
-before protocol negotiation, checked 2.12 MAPS/auth/character codecs and qualified
-installed content. Mode IDs and effective 2.12 item/skill/world catalogs must be
-verified before gameplay. The first live acceptance target is launcher boot,
-character creation and login using an isolated test identity.
+The planned first native test uses app20231/protocol1793 and fresh isolated
+test identity selected in private coordination. The client owner has qualified the original2.12 local-name
+setter and no-ticket path. Only the mag-212 instance may use the existing explicit
+`MAG_PORTAL_TICKETS=off` development-name policy for that test; preserve every
+existing row and all other worlds' auth. Portal staff status/admin HMAC remains
+independent. Restore required tickets once the2.12 client ticket hook is qualified.
+No SVO endpoint is provisioned or inferred from the portal URL.
+
+The deployment owner supplies exact endpoint/secret references and must await
+an explicit ready handoff. Use the deployment owner's verified private host/address, with MAPS bootstrap
+TCP10073 (not the internal container10471), MAS10475, MLS10478 and MPS10477;
+noMAPSUDP. The initial gameplayTCP10473/UDP pool remains unqualified by login
+tests. Exact addresses, storage and identity details belong in private receipts. Mode IDs and effective2.12 item/skill/world
+catalogs must be verified before gameplay. The first live acceptance target is
+launcher boot, character creation and login using the isolated test identity.
 
 ## Offline checks
 

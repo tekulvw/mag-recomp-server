@@ -9,6 +9,7 @@ namespace Server.Medius
     /// <summary>Isolated local MAS protocol session; no Medius account or PSN ticket validation.</summary>
     public sealed class MagMasSession : IMagPortalSession
     {
+        public uint WireProtocolVersion { get; } = Program.Settings.MagProtocolVersion;
         public enum SessionState { AwaitingHello, ProtocolInfoSent, ProtocolAcknowledged, LocalDevelopmentAuthenticated, CharacterCreated, AccountLoginSent, CharacterDataSent }
         public SessionState State { get; private set; } = SessionState.AwaitingHello;
         public bool IsEstablished => State != SessionState.AwaitingHello;
@@ -59,7 +60,7 @@ namespace Server.Medius
             if (!enabled || !MagPluginRouting.IsSelectedApplication(applicationId) || !envelope.IsValid ||
                 !MagPluginRouting.IsClientPluginId(applicationId, envelope.PluginId))
                 return Array.Empty<RT_MSG_SERVER_PLUGIN_TO_APP>();
-            if (!MagMessageCodec.TryParseClientForApplication(envelope.Payload, applicationId, out var message))
+            if (!MagPluginRouting.TryParseClient(envelope.Payload, applicationId, WireProtocolVersion, out var message))
             {
                 ObserveActivity(now);
                 return Array.Empty<RT_MSG_SERVER_PLUGIN_TO_APP>();
@@ -75,8 +76,8 @@ namespace Server.Medius
                 case MagHello _ when State == SessionState.AwaitingHello:
                     State = SessionState.ProtocolInfoSent;
                     ObserveActivity(now);
-                    return Reply(applicationId, new MagProtocolInfo { ProtocolVersion = Program.Settings.MagProtocolVersion, BuildNumber = 0 });
-                case MagProtocolInfo protocol when State == SessionState.ProtocolInfoSent && protocol.ProtocolVersion == Program.Settings.MagProtocolVersion:
+                    return Reply(applicationId, new MagProtocolInfo { ProtocolVersion = WireProtocolVersion, BuildNumber = 0 });
+                case MagProtocolInfo protocol when State == SessionState.ProtocolInfoSent && protocol.ProtocolVersion == WireProtocolVersion:
                     // Client build differences are nonfatal. Do not ping-pong the acknowledgement.
                     State = SessionState.ProtocolAcknowledged;
                     break;
@@ -190,7 +191,7 @@ namespace Server.Medius
             return Array.Empty<RT_MSG_SERVER_PLUGIN_TO_APP>();
         }
 
-        private static IReadOnlyList<RT_MSG_SERVER_PLUGIN_TO_APP> Reply(int applicationId, MagMessage message) =>
-            new[] { MagMessageCodec.ToPluginMessageForApplication(message, applicationId) };
+        private IReadOnlyList<RT_MSG_SERVER_PLUGIN_TO_APP> Reply(int applicationId, MagMessage message) =>
+            new[] { MagPluginRouting.ToClient(message, applicationId, WireProtocolVersion) };
     }
 }

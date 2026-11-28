@@ -74,3 +74,26 @@ Read existing main build caches without writing them. Preparing workflow source
 is not dispatching a build or cutting a release. Existing local-only deployment
 ownership stays with homelab. Its latest user direction is to mimic modes
 access and portal status, superseding the earlier LAN-only source restriction.
+
+## Connected profile increment
+
+The second source increment explicitly selects1793 for app20231 and pins that
+choice per MAPS/MAS/MLS connection. It maps the24 selected handshake/character
+IDs individually, using the existing internal message models while changing the
+wire representation. No unsupported1793 ID falls back to an old layout.
+The original prototype/1740 APIs and startup defaults remain supported.
+
+Independent bounded native checks on the exact2.12 engine confirmed constructor
+immediates (base constructor0x10b3b0), list reader0x70f97c, summary0x70e278,
+record0x70e914, create marshal0x710130/0x7101e4 and response0x3d59cc. The list has
+no allowed-characters byte; summaries add2bits; records add6u16+5u32; creation
+adds1bit after the36-byte NP identity. Unknown field meanings remain unknown.
+New local record extensions use explicit zero policy pending native acceptance.
+
+The current synthetic acceptance covers complete preinstalled patch checks,
+required signed tickets as well as opt-in development names, all3 selectable
+slots, creation, MAS login/data and MLS bind/protocol/keepalive/logout. Old clan
+and party handling is disabled under1793; queue/status/gameplay remain future
+work. Native-client acceptance additionally requires qualified2.12 character
+catalogs and recomp boot readiness. Local server deployment remains stopped
+until those owners receive an explicit source/config ready handoff.

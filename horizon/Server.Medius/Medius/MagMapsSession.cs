@@ -10,6 +10,7 @@ namespace Server.Medius
     /// <summary>Local development MAPS session; no Medius account or PSN ticket validation.</summary>
     public sealed class MagMapsSession : IMagPortalSession
     {
+        public uint WireProtocolVersion { get; } = Program.Settings.MagProtocolVersion;
         public enum SessionState { AwaitingHello, HelloSent, WaitingForAuthentication, LocalDevelopmentAuthenticated, ContentSent, CharacterListSent, WaitingForUniverse }
         public SessionState State { get; private set; } = SessionState.AwaitingHello;
         public bool IsEstablished => State != SessionState.AwaitingHello;
@@ -58,7 +59,7 @@ namespace Server.Medius
             PortalTicketRefusal = null;
             if (!enabled || !MagPluginRouting.IsSelectedApplication(applicationId) || !envelope.IsValid || envelope.PluginId != 0)
                 return Array.Empty<RT_MSG_SERVER_PLUGIN_TO_APP>();
-            if (!MagMessageCodec.TryParseClientForApplication(envelope.Payload, applicationId, out var message))
+            if (!MagPluginRouting.TryParseClient(envelope.Payload, applicationId, WireProtocolVersion, out var message))
             {
                 ObserveActivity(now);
                 return Array.Empty<RT_MSG_SERVER_PLUGIN_TO_APP>();
@@ -103,6 +104,11 @@ namespace Server.Medius
                     State = SessionState.LocalDevelopmentAuthenticated;
                     ObserveActivity(now);
                     return Reply(applicationId, new MagNpAuthenticateResponse { TransactionId = request.TransactionId, Success = true });
+                case MagPatch212Request request when applicationId == 20231 && WireProtocolVersion == 1793 && AccountAuthEnabled &&
+                    State == SessionState.LocalDevelopmentAuthenticated && Complete212Install(request):
+                    ObserveActivity(now);
+                    return MagPatch212Codec.NoDownloadReply().Select(payload =>
+                        new RT_MSG_SERVER_PLUGIN_TO_APP {PluginId = 0, Payload = payload}).ToArray();
                 case MagRetailPatchRequest request when applicationId == 20231 && AccountAuthEnabled &&
                     State == SessionState.LocalDevelopmentAuthenticated && request.HighestVersion == 0 && request.InitialVersion == 0 &&
                     request.BuildString == "ABmagprod370048" && request.Language == "english":
@@ -131,7 +137,7 @@ namespace Server.Medius
                         {
                             if (CharacterStore == null) throw new IOException("Character store unavailable.");
                             response.AllowedCharacters = LocalCharacterStore.CharacterSlots;
-                            response.Characters = SlotList(CharacterStore.ReadForAccount(AuthenticatedAccount)).Select(c => applicationId == 20231
+                            response.Characters = SlotList(CharacterStore.ReadForAccount(AuthenticatedAccount), WireProtocolVersion == 1793).Select(c => applicationId == 20231
                                 ? MagRetailCharacterSummary.FromSummary(c) : c).ToList();
                             response.CharacterCount = (byte)response.Characters.Count; StorageStatus = "local-profile-list-read";
                         }
@@ -144,18 +150,31 @@ namespace Server.Medius
             return Array.Empty<RT_MSG_SERVER_PLUGIN_TO_APP>();
         }
 
+        private static bool Complete212Install(MagPatch212Request request)
+        {
+            // This instance serves preinstalled content only. Optional base level0
+            // is accepted; missing, duplicate or unknown patch levels never get a
+            // terminal reply that would falsely claim a download completed.
+            uint[] required = {445230,465304,467225,489979};
+            var levels = request.InstalledLevels;
+            return request.BuildString == "ABmagprod493603" && request.Language == "english" &&
+                levels != null && levels.Length == levels.Distinct().Count() &&
+                required.All(levels.Contains) && levels.All(level => level == 0 || required.Contains(level));
+        }
+
         /// <summary>
         /// The account's characters as list positions: position N is slot N. The client shows the allowed
         /// number of slots and treats a summary with id 0 as an empty one (its own offline emulator lists one
         /// character and two cleared summaries). A slot freed below an occupied one is sent as a cleared
         /// summary so the characters above it keep their places; trailing empty slots are left out, so an
         /// account with characters in its first slots gets exactly the list it always had.
+        /// The 1793 profile includes every empty tail slot because its count defines selectable slots.
         /// </summary>
-        internal static List<MagCharacterSummary> SlotList(IReadOnlyList<StoredCharacter> characters)
+        internal static List<MagCharacterSummary> SlotList(IReadOnlyList<StoredCharacter> characters, bool includeEmptyTail = false)
         {
             var list = new List<MagCharacterSummary>();
-            if (characters.Count == 0) return list;
-            int highest = characters.Max(c => c.Slot);
+            if (characters.Count == 0 && !includeEmptyTail) return list;
+            int highest = includeEmptyTail ? LocalCharacterStore.CharacterSlots - 1 : characters.Max(c => c.Slot);
             for (int slot = 0; slot <= highest; slot++)
                 list.Add(characters.FirstOrDefault(c => c.Slot == slot)?.ToSummary() ?? ClearedSummary());
             return list;
@@ -175,7 +194,7 @@ namespace Server.Medius
             return true;
         }
 
-        private static IReadOnlyList<RT_MSG_SERVER_PLUGIN_TO_APP> Refuse(int applicationId, MagNpAuthenticateResponse refusal) =>
+        private IReadOnlyList<RT_MSG_SERVER_PLUGIN_TO_APP> Refuse(int applicationId, MagNpAuthenticateResponse refusal) =>
             refusal == null ? Array.Empty<RT_MSG_SERVER_PLUGIN_TO_APP>() : Reply(applicationId, refusal);
 
         private static MagUniverseListResponse UniverseResponse(int transactionId, bool retail)
@@ -189,7 +208,7 @@ namespace Server.Medius
             return response;
         }
 
-        private static IReadOnlyList<RT_MSG_SERVER_PLUGIN_TO_APP> Reply(int applicationId, params MagMessage[] messages) =>
-            messages.Select(message => MagMessageCodec.ToPluginMessageForApplication(message, applicationId)).ToArray();
+        private IReadOnlyList<RT_MSG_SERVER_PLUGIN_TO_APP> Reply(int applicationId, params MagMessage[] messages) =>
+            messages.Select(message => MagPluginRouting.ToClient(message, applicationId, WireProtocolVersion)).ToArray();
     }
 }

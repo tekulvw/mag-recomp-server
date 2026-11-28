@@ -28,6 +28,11 @@ void Test(string name, Action action)
     passed++;
 }
 
+Test("2.12 portal tickets preserve required authentication", Profile212Checks.PortalTickets);
+Test("2.12 MAPS character creation and MAS login sessions", Profile212Checks.Sessions);
+Test("2.12 profile IDs and strict selection", Profile212Checks.WireIds);
+Test("2.12 character slot create and record layouts", Profile212Checks.CharacterLayouts);
+
 Test("2.12 patch request vector and strict boundaries", Patch212Checks.Request);
 Test("2.12 patch completion split settings and terminal bit", Patch212Checks.Completion);
 

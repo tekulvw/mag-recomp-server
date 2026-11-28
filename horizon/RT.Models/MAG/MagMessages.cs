@@ -115,6 +115,8 @@ namespace RT.Models.MAG
         public byte VoiceId { get; set; }
         public uint UniverseId { get; set; }
         public byte[] NpId { get; set; } = new byte[36];
+        // 2.12 marshal710130 reads object+0xb0 as one bit; meaning remains unknown.
+        public bool Patch212UnknownB0 { get; set; }
     }
     public sealed class MagCreateCharacterResponse : MagPluginClientMessage
     {
@@ -159,6 +161,8 @@ namespace RT.Models.MAG
     {
         // Native retail Clear008BD688 initializes this field to zero.
         public byte VeteranLevel { get; set; }
+        public bool Patch212SlotLocked { get; set; }
+        public bool Patch212SlotUnknown { get; set; }
         public static MagRetailCharacterSummary FromSummary(MagCharacterSummary summary) => new MagRetailCharacterSummary
         {
             Name = summary.Name, AccountId = summary.AccountId, Faction = summary.Faction,
@@ -258,6 +262,10 @@ namespace RT.Models.MAG
         // Original retail008BDA40/008BE014 tails; Clear008BDE34 zeros both.
         public byte VeteranLevel { get; set; }
         public byte Flags { get; set; }
+        // 2.12 demarshal70e914 appends these fixed-width fields. Retain raw
+        // values; newly created local records use zeros until semantics are known.
+        public ushort[] Patch212Unknown16 { get; set; } = new ushort[6];
+        public uint[] Patch212Unknown32 { get; set; } = new uint[5];
     }
 }
 
