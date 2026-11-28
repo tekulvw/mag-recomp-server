@@ -16,15 +16,15 @@ use axum::routing::get;
 use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::json;
-use time::{Duration, OffsetDateTime, PrimitiveDateTime};
+use time::{Duration, OffsetDateTime};
 
 use crate::db::Session;
 use crate::player_reports::{
     self, MAX_DESCRIPTION, NewReport, Reason, Resolved, Status, SubmitOutcome,
 };
 use crate::web::{
-    AppState, PageResult, Shared, api_error, csrf_failed, csrf_ok, current_session, message, page,
-    require_session, when,
+    AppState, PageResult, Shared, Stamp, api_error, csrf_failed, csrf_ok, current_session, message,
+    page, require_session, stamp,
 };
 
 const SCRIPT: &str = include_str!("../static/report.js");
@@ -118,7 +118,7 @@ fn own_key(session: &Session) -> Option<String> {
 struct MyRow {
     target: String,
     reason: String,
-    filed: String,
+    filed: Stamp,
     status: &'static str,
 }
 
@@ -147,7 +147,7 @@ async fn mine_page(
         .map(|r| MyRow {
             target: r.target_name,
             reason: Reason::label_of(&r.reason).to_owned(),
-            filed: when(r.created_at),
+            filed: stamp(r.created_at),
             status: Status::reporter_view(&r.status),
         })
         .collect();
@@ -273,25 +273,9 @@ struct ReportForm {
 /// The incident time from the form: `YYYY-MM-DDTHH:MM` (seconds optional) in the reporter's
 /// time zone, as UTC. `Ok(None)` when left empty.
 fn parse_when(raw: &str, tz: &str, now: OffsetDateTime) -> Result<Option<OffsetDateTime>, ()> {
-    let raw = raw.trim();
-    if raw.is_empty() {
+    let Some(at) = crate::web::form_instant(raw, tz)? else {
         return Ok(None);
-    }
-    let minutes = time::macros::format_description!("[year]-[month]-[day]T[hour]:[minute]");
-    let seconds =
-        time::macros::format_description!("[year]-[month]-[day]T[hour]:[minute]:[second]");
-    let local = PrimitiveDateTime::parse(raw, &minutes)
-        .or_else(|_| PrimitiveDateTime::parse(raw, &seconds))
-        .map_err(|_| ())?;
-    let offset = match tz.trim() {
-        "" => 0,
-        t => t
-            .parse::<i64>()
-            .ok()
-            .filter(|m| (-16 * 60..=16 * 60).contains(m))
-            .ok_or(())?,
     };
-    let at = local.assume_utc() + Duration::minutes(offset);
     // A day of slack for a browser clock or time zone that is off.
     if at > now + Duration::days(1) || at < now - Duration::days(MAX_AGE_DAYS) {
         return Err(());

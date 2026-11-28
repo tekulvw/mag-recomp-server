@@ -1,7 +1,7 @@
 {% extends "base.html" %}
 {% block title %}MAG, playable again{% endblock %}
 {% block content %}
-<div id="status-banner">{% if let Some(b) = view.banner %}<p class="banner" role="status"><strong>Notice:</strong> {{ b.message }}{% if let Some(t) = b.restart_text %} <span class="quiet">Back by {{ t }}.</span>{% endif %}</p>{% endif %}</div>
+<div id="status-banner">{% if let Some(b) = view.banner %}<p class="banner" role="status"><strong>Notice:</strong> {{ b.message }}{% if let Some(t) = b.restart %} <span class="quiet">Back by {{ t }}.</span>{% endif %}</p>{% endif %}</div>
 <section class="hero">
   <div>
     <p class="eyebrow">Community server · play.magtest.online</p>

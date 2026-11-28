@@ -172,7 +172,12 @@ impl Harness {
             req = req.header("cookie", format!("{SESSION_COOKIE}={}", p.session));
         }
         let r = req.send().await.unwrap();
-        (r.status(), r.text().await.unwrap())
+        let status = r.status();
+        let text = r.text().await.unwrap();
+        if text.starts_with("<!doctype html>") {
+            support::page_times(&text);
+        }
+        (status, text)
     }
 
     async fn csrf(&self, p: &Player) -> String {
@@ -299,6 +304,11 @@ async fn players_file_reports_and_see_only_their_status(
         assert!(form.contains(&format!("value=\"{reason}\"")), "{reason}");
     }
     assert!(form.contains("value=\"Bravo\""));
+    // The incident time is typed in local time; the shared time script names the zone and sends
+    // its offset. Without it the label says UTC, as the server then reads it.
+    assert!(form.contains("<span data-zone-for=\"report-when\">UTC</span>"));
+    assert!(form.contains("id=\"report-when\" value=\"\" data-tz-field=\"report-tz\""));
+    assert!(form.contains("<script src=\"/time.js?v="));
     let script = h
         .http
         .get(format!("{}/report.js", h.base))
@@ -366,6 +376,7 @@ async fn players_file_reports_and_see_only_their_status(
     assert!(mine.contains("sent to the moderators"));
     assert!(mine.contains("Bravo") && mine.contains("Harassment or voice abuse"));
     assert!(mine.contains("<td>open</td>"));
+    assert_eq!(support::page_times(&mine), 1, "filed: {mine}");
     // Names only: no emails or account numbers of anyone.
     assert!(!mine.contains("bravo@example.test") && !mine.contains("/admin/users/"));
 
@@ -619,6 +630,7 @@ async fn moderators_review_and_every_change_is_audited(
     assert!(charlie_row < alice_row, "newest first");
     assert!(page.contains(&format!("href=\"/admin/users/{}\">Alice</a>", alice.id)));
     assert!(page.contains("<td>1 (1 open)</td>"));
+    assert_eq!(support::page_times(&page), 2, "filed: {page}");
     let (_, filtered) = h
         .get("/admin/player-reports?reason=cheating", Some(&moderator))
         .await;
@@ -680,6 +692,12 @@ async fn moderators_review_and_every_change_is_audited(
         .await;
     assert!(detail.contains("Voice muted 7 days.") && detail.contains("mod@example.test"));
     assert!(detail.contains("Reopen"));
+    // Filed, happened and reviewed are times; the reviewer is text beside them.
+    assert!(support::page_times(&detail) >= 3, "{detail}");
+    assert!(
+        detail.contains(" UTC</time> by mod@example.test</dd>"),
+        "{detail}"
+    );
 
     // The reporter sees "reviewed", never the note or the decision.
     let (_, mine) = h.get("/reports", Some(&alice)).await;

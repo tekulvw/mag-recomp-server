@@ -1,4 +1,5 @@
-//! HTTP routes: the website (server-rendered, no JavaScript) and the launcher API.
+//! HTTP routes: the website (server-rendered; its optional scripts only show times locally,
+//! refresh the status and suggest names) and the launcher API.
 
 use std::convert::Infallible;
 use std::net::{IpAddr, SocketAddr};
@@ -116,6 +117,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/", get(home))
         .route("/privacy", get(privacy))
         .route("/style.css", get(stylesheet))
+        .route("/time.js", get(time_script))
         .route("/fonts/{name}", get(font))
         .route("/healthz", get(healthz))
         .route("/auth/google", get(sign_in))
@@ -319,8 +321,8 @@ struct MessagePage {
 struct DeviceRow {
     id: i32,
     label: String,
-    created: String,
-    last_used: String,
+    created: Stamp,
+    last_used: Stamp,
 }
 
 #[derive(Template)]
@@ -363,7 +365,7 @@ struct LinkConfirmPage {
     code: String,
     shown_code: String,
     label: String,
-    requested: String,
+    requested: Stamp,
     player_name: String,
 }
 
@@ -394,9 +396,154 @@ pub(crate) fn message(
     )
 }
 
+/// An instant as plain text, `2026-11-28 05:25 UTC`: for the audit log, JSON and other text that is
+/// not a page. Pages show instants as a [`Stamp`].
 pub(crate) fn when(t: OffsetDateTime) -> String {
     let format = time::macros::format_description!("[year]-[month]-[day] [hour]:[minute] UTC");
-    t.format(&format).unwrap_or_default()
+    t.to_offset(time::UtcOffset::UTC)
+        .format(&format)
+        .unwrap_or_default()
+}
+
+/// An instant as a page shows it.
+pub fn stamp(t: OffsetDateTime) -> Stamp {
+    Stamp::At(t)
+}
+
+/// A time on a page. An instant renders as
+/// `<time class="local-time" datetime="2026-11-28T05:25:47Z" title="2026-11-28 05:25:47 UTC">2026-11-28 05:25 UTC</time>`:
+/// the text is correct, and labelled UTC, without scripts, and `static/time.js` rewrites it in the
+/// viewer's own time zone. A day renders as `<time datetime="2026-11-28">`, which the script
+/// leaves alone, so it never moves to a neighbouring day. Anything else is shown as given.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Stamp {
+    At(OffsetDateTime),
+    /// A calendar day, `YYYY-MM-DD`.
+    Day(String),
+    /// Words in place of a time ("never", "until lifted"), or a time that could not be read.
+    Text(String),
+}
+
+impl Stamp {
+    /// A time a game server sent (RFC 3339, such as `2026-11-20T08:30:00Z`); anything that does not
+    /// parse is shown as given.
+    pub fn parse(raw: &str) -> Self {
+        match OffsetDateTime::parse(raw.trim(), &time::format_description::well_known::Rfc3339) {
+            Ok(t) => Self::At(t),
+            Err(_) => Self::Text(raw.to_owned()),
+        }
+    }
+
+    pub fn text(words: &str) -> Self {
+        Self::Text(words.to_owned())
+    }
+
+    /// No time at all (an unknown one).
+    pub fn is_empty(&self) -> bool {
+        matches!(self, Self::Text(s) if s.is_empty())
+    }
+
+    /// The instant as machine-readable UTC, `2026-11-28T05:25:47Z`.
+    pub fn iso(t: OffsetDateTime) -> String {
+        let format =
+            time::macros::format_description!("[year]-[month]-[day]T[hour]:[minute]:[second]Z");
+        t.to_offset(time::UtcOffset::UTC)
+            .format(&format)
+            .unwrap_or_default()
+    }
+}
+
+impl std::fmt::Display for Stamp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        use askama::filters::Escaper;
+        match self {
+            Self::At(t) => {
+                let full = time::macros::format_description!(
+                    "[year]-[month]-[day] [hour]:[minute]:[second] UTC"
+                );
+                let utc = t.to_offset(time::UtcOffset::UTC);
+                // Only digits and the formats' own characters: nothing here needs escaping.
+                write!(
+                    f,
+                    "<time class=\"local-time\" datetime=\"{}\" title=\"{}\">{}</time>",
+                    Self::iso(utc),
+                    utc.format(&full).unwrap_or_default(),
+                    when(utc)
+                )
+            }
+            Self::Day(day) => {
+                f.write_str("<time datetime=\"")?;
+                askama::filters::Html.write_escaped_str(&mut *f, day)?;
+                f.write_str("\">")?;
+                askama::filters::Html.write_escaped_str(&mut *f, day)?;
+                f.write_str("</time>")
+            }
+            Self::Text(words) => askama::filters::Html.write_escaped_str(f, words),
+        }
+    }
+}
+
+// Display escapes whatever did not come from the portal's own formatting.
+impl askama::filters::HtmlSafe for Stamp {}
+
+/// A `datetime-local` form value (`2026-11-26T18:30`, seconds optional) as an instant. `tz` is the
+/// browser's `Date.getTimezoneOffset()` for that value (minutes behind UTC), which
+/// `static/time.js` fills in; without it the value is UTC. `Ok(None)` when empty.
+pub(crate) fn form_instant(raw: &str, tz: &str) -> Result<Option<OffsetDateTime>, ()> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    let minutes = time::macros::format_description!("[year]-[month]-[day]T[hour]:[minute]");
+    let seconds =
+        time::macros::format_description!("[year]-[month]-[day]T[hour]:[minute]:[second]");
+    let local = time::PrimitiveDateTime::parse(raw, &minutes)
+        .or_else(|_| time::PrimitiveDateTime::parse(raw, &seconds))
+        .map_err(|_| ())?;
+    let offset = match tz.trim() {
+        "" => 0,
+        t => t
+            .parse::<i64>()
+            .ok()
+            .filter(|m| (-16 * 60..=16 * 60).contains(m))
+            .ok_or(())?,
+    };
+    Ok(Some(local.assume_utc() + Duration::minutes(offset)))
+}
+
+/// An instant as a UTC `datetime-local` form value, `2026-11-26T18:30`, for an input marked
+/// `data-utc` (which `static/time.js` shows in the viewer's time zone).
+pub(crate) fn form_value(t: OffsetDateTime) -> String {
+    let format = time::macros::format_description!("[year]-[month]-[day]T[hour]:[minute]");
+    t.to_offset(time::UtcOffset::UTC)
+        .format(&format)
+        .unwrap_or_default()
+}
+
+const TIME_SCRIPT: &str = include_str!("../static/time.js");
+
+/// A short digest of the time script, for `/time.js?v=<this>` (as for the stylesheet).
+pub fn time_script_version() -> &'static str {
+    static VERSION: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    VERSION.get_or_init(|| tokens::b64url(&tokens::sha256(TIME_SCRIPT.as_bytes())[..9]))
+}
+
+/// The script every page loads to show times in the viewer's time zone. Without it, pages show
+/// them in UTC, labelled.
+async fn time_script(Query(q): Query<StyleQuery>) -> Response {
+    let cache = if q.v.as_deref() == Some(time_script_version()) {
+        "public, max-age=31536000, immutable"
+    } else {
+        "public, max-age=300"
+    };
+    (
+        [
+            (header::CONTENT_TYPE, "text/javascript; charset=utf-8"),
+            (header::CACHE_CONTROL, cache),
+        ],
+        TIME_SCRIPT,
+    )
+        .into_response()
 }
 
 // ---- Cookies and sessions ----
@@ -750,8 +897,8 @@ async fn account_page(State(state): Shared, headers: HeaderMap) -> PageResult {
         .map(|d| DeviceRow {
             id: d.id,
             label: d.label,
-            created: when(d.created_at),
-            last_used: d.last_used_at.map(when).unwrap_or_else(|| "never".into()),
+            created: stamp(d.created_at),
+            last_used: d.last_used_at.map_or_else(|| Stamp::text("never"), stamp),
         })
         .collect();
     let staff_role = crate::staff::role_for_email(
@@ -1028,7 +1175,7 @@ async fn link_lookup(
             shown_code: tokens::format_user_code(&pending.user_code),
             code: pending.user_code,
             label: pending.client_label,
-            requested: when(pending.created_at),
+            requested: stamp(pending.created_at),
             player_name: session.account.player_name.unwrap_or_default(),
         },
     ))
@@ -1365,6 +1512,58 @@ async fn api_ticket_keys(State(state): Shared) -> Response {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stamps() {
+        let at = time::macros::datetime!(2026-11-28 05:25:47.5 UTC);
+        assert_eq!(
+            stamp(at).to_string(),
+            "<time class=\"local-time\" datetime=\"2026-11-28T05:25:47Z\" \
+             title=\"2026-11-28 05:25:47 UTC\">2026-11-28 05:25 UTC</time>"
+        );
+        // Another offset is shown as the same instant in UTC.
+        let east = at.to_offset(time::macros::offset!(+9));
+        assert_eq!(stamp(east), stamp(at));
+        assert_eq!(stamp(east).to_string(), stamp(at).to_string());
+        assert_eq!(when(east), "2026-11-28 05:25 UTC");
+        // Game server times parse; anything else is text, escaped.
+        assert_eq!(
+            Stamp::parse("2026-11-20T08:30:00Z"),
+            Stamp::At(time::macros::datetime!(2026-11-20 08:30 UTC))
+        );
+        assert_eq!(
+            Stamp::parse("2026-11-20T08:30:00Z+30m").to_string(),
+            "2026-11-20T08:30:00Z+30m"
+        );
+        assert_eq!(Stamp::parse("<b>").to_string(), "&#60;b&#62;");
+        assert!(Stamp::parse("").is_empty() && !Stamp::text("never").is_empty());
+        assert_eq!(Stamp::text("never").to_string(), "never");
+        // A day stays a day: the script leaves it alone.
+        assert_eq!(
+            Stamp::Day("2026-11-28".into()).to_string(),
+            "<time datetime=\"2026-11-28\">2026-11-28</time>"
+        );
+    }
+
+    #[test]
+    fn form_times() {
+        let at = time::macros::datetime!(2026-11-27 10:30 UTC);
+        assert_eq!(form_instant(" ", ""), Ok(None));
+        assert_eq!(form_instant("2026-11-27T10:30", ""), Ok(Some(at)));
+        assert_eq!(form_instant("2026-11-27T05:30:00", "300"), Ok(Some(at)));
+        assert_eq!(form_instant("2026-11-27T11:30", "-60"), Ok(Some(at)));
+        for (bad, tz) in [
+            ("soon", ""),
+            ("2026-11-27T10:30", "x"),
+            ("2026-11-27T10:30", "961"),
+        ] {
+            assert_eq!(form_instant(bad, tz), Err(()), "{bad} {tz}");
+        }
+        assert_eq!(
+            form_value(at.to_offset(time::macros::offset!(-5))),
+            "2026-11-27T10:30"
+        );
+    }
 
     #[test]
     fn next_paths() {

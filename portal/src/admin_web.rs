@@ -19,8 +19,8 @@ use crate::db::{self, AssignOutcome, ReserveOutcome, Session};
 use crate::names;
 use crate::staff::{self, Role};
 use crate::web::{
-    AppError, AppState, PageResult, Shared, csrf_failed, csrf_ok, message, page, require_session,
-    when,
+    AppError, AppState, PageResult, Shared, Stamp, csrf_failed, csrf_ok, message, page,
+    require_session, stamp,
 };
 
 /// An early response from a guard, boxed because responses are large.
@@ -209,7 +209,7 @@ mod status;
 // ---- Dashboard ----
 
 struct LogView {
-    when: String,
+    when: Stamp,
     actor: String,
     action: String,
     target: String,
@@ -238,7 +238,7 @@ async fn dashboard(State(state): Shared, headers: HeaderMap) -> PageResult {
         .await?
         .into_iter()
         .map(|l| LogView {
-            when: when(l.created_at),
+            when: stamp(l.created_at),
             actor: l.actor_email,
             action: l.action,
             target: l.target,
@@ -280,7 +280,7 @@ struct UserRow {
     id: i32,
     name: String,
     email: String,
-    created: String,
+    created: Stamp,
     banned: bool,
     devices: i64,
     service: bool,
@@ -322,7 +322,7 @@ async fn users(
             id: a.id,
             name: a.player_name.unwrap_or_default(),
             email: a.email.unwrap_or_default(),
-            created: when(a.created_at),
+            created: stamp(a.created_at),
             banned: a.banned_at.is_some(),
             devices: a.devices,
             service: a.kind == db::SERVICE_KIND,
@@ -348,11 +348,17 @@ async fn users(
     ))
 }
 
+/// An account's ban as the admin pages show it.
+struct BanView {
+    since: Stamp,
+    reason: String,
+}
+
 struct DeviceView {
     id: i32,
     label: String,
-    created: String,
-    last_used: String,
+    created: Stamp,
+    last_used: Stamp,
 }
 
 #[derive(Template)]
@@ -366,8 +372,8 @@ struct UserPage {
     name: Option<String>,
     email: String,
     provider: String,
-    created: String,
-    ban: Option<String>,
+    created: Stamp,
+    ban: Option<BanView>,
     target_role: Option<&'static str>,
     can_act: bool,
     devices: Vec<DeviceView>,
@@ -393,17 +399,14 @@ async fn user_page(State(state): Shared, headers: HeaderMap, Path(id): Path<i32>
         .map(|d| DeviceView {
             id: d.id,
             label: d.label,
-            created: when(d.created_at),
-            last_used: d.last_used_at.map(when).unwrap_or_else(|| "never".into()),
+            created: stamp(d.created_at),
+            last_used: d.last_used_at.map_or_else(|| Stamp::text("never"), stamp),
         })
         .collect();
     let social = crate::social::counts(&state.pool, id).await?;
-    let ban = account.banned_at.map(|at| {
-        format!(
-            "since {}: {}",
-            when(at),
-            account.ban_reason.as_deref().unwrap_or("")
-        )
+    let ban = account.banned_at.map(|at| BanView {
+        since: stamp(at),
+        reason: account.ban_reason.clone().unwrap_or_default(),
     });
     let Nav {
         nav_csrf,
@@ -422,7 +425,7 @@ async fn user_page(State(state): Shared, headers: HeaderMap, Path(id): Path<i32>
             name: account.player_name.clone(),
             email: account.email.clone().unwrap_or_default(),
             provider: account.provider.clone(),
-            created: when(account.created_at),
+            created: stamp(account.created_at),
             ban,
             target_role: target_role.map(Role::as_str),
             can_act: may_change(actor.role, &account, target_role),
@@ -601,7 +604,7 @@ async fn user_delete(
 struct ReservedView {
     name: String,
     reason: String,
-    created: String,
+    created: Stamp,
 }
 
 #[derive(Template)]
@@ -622,7 +625,7 @@ async fn render_names(state: &AppState, actor: &Staff, results: Vec<String>) -> 
         .map(|r| ReservedView {
             name: r.name,
             reason: r.reason,
-            created: when(r.created_at),
+            created: stamp(r.created_at),
         })
         .collect();
     let Nav {
@@ -708,7 +711,7 @@ struct StaffView {
     email: String,
     role: String,
     granted_by: String,
-    created: String,
+    created: Stamp,
     editable: bool,
 }
 
@@ -736,7 +739,7 @@ async fn render_staff(state: &AppState, actor: &Staff, error: Option<String>) ->
                 email: s.email_key,
                 role: s.role,
                 granted_by: s.granted_by_name.unwrap_or_default(),
-                created: when(s.created_at),
+                created: stamp(s.created_at),
             }
         })
         .collect();

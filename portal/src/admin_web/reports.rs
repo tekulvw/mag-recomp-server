@@ -16,7 +16,7 @@ use time::{Duration, OffsetDateTime};
 use super::{CsrfOnly, Nav, require_staff, require_staff_form};
 use crate::reports::{self, Filter, PLATFORMS, TRIGGERS};
 use crate::staff::{self, Role};
-use crate::web::{AppState, PageResult, Shared, message, page, when};
+use crate::web::{AppState, PageResult, Shared, Stamp, message, page, stamp};
 
 const LIST: &str = "/admin/reports";
 const STATS_DAYS: i64 = 14;
@@ -30,7 +30,7 @@ pub(super) fn routes() -> Router<Arc<AppState>> {
 }
 
 struct DayView {
-    day: String,
+    day: Stamp,
     by_trigger: Vec<i64>,
     by_platform: Vec<i64>,
     total: i64,
@@ -38,7 +38,7 @@ struct DayView {
 
 struct ReportView {
     id: String,
-    received: String,
+    received: Stamp,
     account_id: i32,
     player: String,
     trigger: String,
@@ -101,7 +101,7 @@ fn days_view(counts: Vec<reports::DayCount>) -> Vec<DayView> {
                     .map(|p| sum(&|c| c.platform == *p))
                     .collect(),
                 total: sum(&|_| true),
-                day,
+                day: Stamp::Day(day),
             }
         })
         .collect()
@@ -125,7 +125,7 @@ async fn list_page(
         .await?
         .into_iter()
         .map(|r| ReportView {
-            received: when(r.received_at),
+            received: stamp(r.received_at),
             player: r.player_name.unwrap_or_default(),
             logs: r.log_names.len(),
             comment: r
@@ -174,7 +174,7 @@ struct ReportPage {
     role: &'static str,
     is_admin: bool,
     id: String,
-    received: String,
+    received: Stamp,
     account_id: i32,
     player: String,
     account_kind: String,
@@ -229,7 +229,7 @@ async fn report_page(
             role,
             is_admin,
             id: r.id,
-            received: when(r.received_at),
+            received: stamp(r.received_at),
             account_id: r.account_id,
             player: r.player_name.unwrap_or_default(),
             account_kind: r.account_kind,

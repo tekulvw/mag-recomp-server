@@ -1,16 +1,13 @@
 // The "Report a player" form's helpers (docs/portal-player-reports.md). It suggests player names
-// as the reporter types, from /reports/players (names only), and tells the server the browser's
-// time zone so the incident time is stored in UTC. Suggestions are set with .value only: nothing
-// from the answer is ever parsed as HTML. Without this script the form's search button lists
-// matching names, and the time is taken as UTC.
+// as the reporter types, from /reports/players (names only). Suggestions are set with .value only:
+// nothing from the answer is ever parsed as HTML. Without this script the form's search button
+// lists matching names. The shared time.js tells the server the incident time's time zone.
 (function () {
   "use strict";
   var form = document.getElementById("report-form");
   if (!form) return;
   var input = document.getElementById("report-name");
   var list = document.getElementById("report-names");
-  var when = document.getElementById("report-when");
-  var tz = document.getElementById("report-tz");
   var url = form.getAttribute("data-players") || "/reports/players";
   var timer = null;
   var asked = "";
@@ -48,10 +45,4 @@
       timer = setTimeout(lookUp, 250);
     });
   }
-
-  form.addEventListener("submit", function () {
-    if (!tz || !when || !when.value) return;
-    var local = new Date(when.value);
-    if (!isNaN(local.getTime())) tz.value = String(local.getTimezoneOffset());
-  });
 })();

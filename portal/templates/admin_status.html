@@ -6,7 +6,7 @@
 <p>What <a href="/status">the status page</a> shows, with staff-only servers too. Overall: {{ crate::status::state_label(view.state) }}.</p>
 <h2>Maintenance banner</h2>
 {% if let Some(b) = view.banner %}
-<div class="banner" role="status"><strong>Notice:</strong> {{ b.message }}{% if let Some(t) = b.restart_text %} <span class="quiet">Back by {{ t }}.</span>{% endif %}</div>
+<div class="banner" role="status"><strong>Notice:</strong> {{ b.message }}{% if let Some(t) = b.restart %} <span class="quiet">Back by {{ t }}.</span>{% endif %}</div>
 {% else %}
 <p class="quiet">No banner is shown.</p>
 {% endif %}
@@ -16,7 +16,8 @@
 <form method="post" action="/admin/status/banner" class="stack">
   <input type="hidden" name="csrf" value="{{ csrf }}">
   <label>Message<textarea name="message" rows="3" maxlength="{{ crate::status::MAX_BANNER }}" required>{{ message }}</textarea></label>
-  <label>Restart expected at (UTC, optional)<input type="datetime-local" name="restart_at" value="{{ restart }}"></label>
+  <input type="hidden" name="tz" id="restart-tz" value="">
+  <label>Restart expected at (<span data-zone-for="restart-at">UTC</span>, optional)<input type="datetime-local" name="restart_at" id="restart-at" value="{{ restart }}" data-utc data-tz-field="restart-tz"></label>
   <button>Show banner</button>
 </form>
 {% if view.banner.is_some() %}

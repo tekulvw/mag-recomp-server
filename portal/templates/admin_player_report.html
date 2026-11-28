@@ -9,7 +9,7 @@
   <dt>Filed</dt><dd>{{ filed }}</dd>
   <dt>Happened</dt><dd>{% if let Some(o) = occurred %}about {{ o }}{% else %}<span class="quiet">not given</span>{% endif %}</dd>
   <dt>Reporter</dt><dd>{% if let Some(rid) = reporter_id %}<a href="/admin/users/{{ rid }}">{{ reporter }}</a>{% else %}<span class="quiet">{{ reporter }}</span>{% endif %} <span class="quiet">(staff only; never shown to the player)</span></dd>
-  <dt>Status</dt><dd>{{ status }}{% if let Some(r) = reviewed %} · {{ r }}{% endif %}</dd>
+  <dt>Status</dt><dd>{{ status }}{% if let Some(r) = reviewed %} · {{ r.at }} by {{ r.by }}{% endif %}</dd>
 </dl>
 <h2>What happened</h2>
 <p class="comment">{{ description }}</p>

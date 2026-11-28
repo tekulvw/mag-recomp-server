@@ -11,9 +11,16 @@ friends list (requests, blocks) at `/friends`, and game clients relay presence t
 portal: see [friends and presence](../docs/portal-social.md). Players report other players'
 conduct at `/reports/new` for moderators to review: see [player reports](../docs/portal-player-reports.md).
 
-The site is server-rendered HTML. Its only JavaScript, `static/status.js`, keeps the home and
-status pages' server status current without a reload, and `static/report.js` suggests names in
-the report form; every page works without them. It stores accounts in PostgreSQL and
+The site is server-rendered HTML. Its only JavaScript: `static/time.js`, on every page, shows
+times in the viewer's own time zone; `static/status.js` keeps the home and status pages' server
+status current without a reload; and `static/report.js` suggests names in the report form.
+Every page works without them. Pages render each time as `<time datetime="…Z">` with UTC text
+(labelled UTC), which `time.js` rewrites with `Intl.DateTimeFormat` in the browser's locale and
+zone, with the full local and UTC time in its tooltip; times added later (the status refresh) are
+formatted as they arrive. Calendar days (the reports' per-day counts, which are UTC days) are
+left as they are. Form times (the banner's restart time, a report's incident time) are typed in
+local time: the script names the zone beside the field and sends its offset, and the portal
+stores UTC; without the script the field is labelled UTC and read as UTC. It stores accounts in PostgreSQL and
 never passes Google tokens on to the game or the game server.
 
 ## Build and test

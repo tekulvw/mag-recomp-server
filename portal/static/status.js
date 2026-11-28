@@ -2,6 +2,7 @@
 // /api/v1/status, which the portal serves from its cache, every refresh interval while the tab
 // is visible, and rebuilds the block from the JSON with textContent only: nothing from the
 // answer is ever parsed as HTML. Without this script the server-rendered block stays as it is.
+// Times go in as <time class="local-time"> elements, which time.js shows in the viewer's zone.
 (function () {
   "use strict";
   var root = document.getElementById("status-live");
@@ -31,6 +32,12 @@
   function known(value) {
     return value === undefined || value === null ? "unknown" : value;
   }
+  // A time from the JSON: its ISO instant for time.js, its UTC text until then.
+  function stamp(iso, text) {
+    var t = el("time", "local-time", text || iso);
+    if (iso) t.setAttribute("datetime", iso);
+    return t;
+  }
   function clear(node) {
     while (node.firstChild) node.removeChild(node.firstChild);
   }
@@ -50,7 +57,9 @@
     add(p, document.createTextNode(" " + b.message));
     if (b.restart_text) {
       add(p, document.createTextNode(" "));
-      add(p, el("span", "quiet", "Back by " + b.restart_text + "."));
+      var back = add(p, el("span", "quiet", "Back by "));
+      add(back, stamp(b.restart_expected_at, b.restart_text));
+      add(back, document.createTextNode("."));
     }
   }
 
@@ -87,9 +96,12 @@
     if (s.host) add(add(names, el("p", "quiet")), el("code", null, s.host));
     add(head, el("span", "pill state-" + stateClass(s.state), s.state_label));
     var worlds = s.worlds || [];
-    var summary = s.summary;
-    if (!worlds.length && s.last_seen_text) summary += " Last seen " + s.last_seen_text + ".";
-    add(section, el("p", null, summary));
+    var summary = add(section, el("p", null, s.summary));
+    if (!worlds.length && s.last_seen_text) {
+      add(summary, document.createTextNode(" Last seen "));
+      add(summary, stamp(s.last_seen, s.last_seen_text));
+      add(summary, document.createTextNode("."));
+    }
     if (!worlds.length) return section;
     var dl = add(section, el("dl", "status-facts"));
     if (s.players_text) fact(dl, "Players online", s.players_text);
@@ -114,6 +126,7 @@
       clear(servers);
       (view.servers || []).forEach(function (s) { add(servers, server(s)); });
     }
+    if (window.MagTime) window.MagTime.localize(document);
   }
 
   function age() {
@@ -121,6 +134,8 @@
     var seconds = Math.max(0, Math.round((Date.now() - lastOk) / 1000));
     var text = seconds < 5 ? "just now" : seconds < 120 ? seconds + " s ago" : Math.round(seconds / 60) + " min ago";
     updated.textContent = stale ? "Could not refresh: showing data from " + text + "." : "Updated " + text + ".";
+    // Relative on the page; the local and UTC time in the tooltip.
+    if (window.MagTime) updated.title = window.MagTime.full(new Date(lastOk));
     updated.classList.toggle("stale", stale);
     root.classList.toggle("stale", stale);
   }
