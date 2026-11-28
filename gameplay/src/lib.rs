@@ -1513,6 +1513,8 @@ pub struct Engine<W: Write> {
     domination_gameplay: Option<domination_gameplay_provider::World>,
     /// Collision the Sabotage objectives place in their current states.
     sabotage_structures: Option<sabotage_structures::Runtime>,
+    /// Sabotage static supply points from the selected match profile.
+    sabotage_static_resupply: Option<std::sync::Arc<human_static_resupply::Catalog>>,
     hospital_rockets: Option<std::sync::Arc<hospital_rockets::Catalog>>,
     infantry_rockets: Option<std::sync::Arc<infantry_rockets::Catalog>>,
     guided_launchers: Option<std::sync::Arc<guided_launchers::Catalog>>,

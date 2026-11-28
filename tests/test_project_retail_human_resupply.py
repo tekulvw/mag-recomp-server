@@ -190,6 +190,38 @@ class HumanStaticSupplyProjectorTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "defending faction"):
             validate(encode(invalid), encode(world))
 
+    def test_sabotage_binds_rules_archive_and_each_map_defender(self):
+        for map_name, attacker, defender in (("mag_cosmodrome_final", 0, 2),
+                                             ("mag_kennicott_final", 2, 0),
+                                             ("mag_remote_comms_final", 0, 1)):
+            level = self.tool["MAPS"][map_name]
+            self.assertEqual((level.mode, level.defender), (0, defender))
+            source = {"map": map_name, "level_archive_sha256": level.archive_sha,
+                      "level_clv_sha256": level.clv_sha,
+                      "game_archive_sha256": self.tool["RULES_ARCHIVE_SHA"]}
+            spawn = {"format": "mag_spawn_catalog", "schema_version": 1, "active": {"map_name": map_name},
+                     "match_profile": {"game_type": 0, "attacking_faction": attacker},
+                     "maps": [{"name": map_name, "owner_faction": defender}], "source": json.dumps(source)}
+            world = {"format": "mag_collision_world", "schema_version": 1, "coordinate_space": "world",
+                     "metadata": {"map_name": map_name, "build": "retail-bcus98110-01.00",
+                                  "provenance": ["Original CLV SHA256 " + level.clv_sha]}}
+            encode = lambda value: json.dumps(value).encode()
+            validate = self.tool["validate_profile"]
+            with self.subTest(map=map_name):
+                result = validate(encode(spawn), encode(world))
+                self.assertEqual((result["map"], result["mode"], result["attacking_faction"]),
+                                 (map_name, 0, attacker))
+                for variant in ({**source, "game_archive_sha256": "a" * 64},
+                                {**source, "native_elf_sha256": "b" * 64},
+                                {key: value for key, value in source.items() if key != "game_archive_sha256"}):
+                    invalid = {**spawn, "source": json.dumps(variant)}
+                    with self.assertRaisesRegex(ValueError, "Sabotage rules archive"):
+                        validate(encode(invalid), encode(world))
+                for mode, other in ((1, attacker), (0, defender)):
+                    invalid = {**spawn, "match_profile": {"game_type": mode, "attacking_faction": other}}
+                    with self.assertRaisesRegex(ValueError, "spawn catalog must select"):
+                        validate(encode(invalid), encode(world))
+
     def test_new_output_is_exactly_checkable_and_cannot_overwrite(self):
         write = self.tool["write_output"]
         with tempfile.TemporaryDirectory() as directory:
