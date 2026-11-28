@@ -21,7 +21,8 @@ one there. Before this change an account held one character.
 - **Any faction in any slot.** Nothing in the client or the store ties an account's characters to
   one faction; the extra slots were sold as a way to play another faction without leaving one.
   Veteran and faction respec (`0x025A`/`0x025B`, level-60 rules) are separate, per-character
-  features that this server does not implement yet.
+  features that this server does not implement yet. Skill respecs (`0x0254`) are per character too
+  (see [skill-respec.md](skill-respec.md)).
 - **Delete exists.** The character screen's delete command sends `0x023C` over MAS, after
   authentication, exactly like creation: the common header, the summary's name (uint16 length and
   bytes) and its id (uint32). The answer, `0x023D`, is the common header and one success bit. Both

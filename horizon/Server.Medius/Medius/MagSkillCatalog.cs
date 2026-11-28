@@ -28,6 +28,10 @@ namespace Server.Medius
         // zero-cost creation skills. Anything outside this set is never awarded by a skill.
         private readonly HashSet<int>[] _awardable = { new HashSet<int>(), new HashSet<int>(), new HashSet<int>() };
         public int ApplicationId { get; private set; }
+        private uint[] _respecFees = Array.Empty<uint>();
+        /// <summary>The authored respec fees (the skill table's <c>ReSpec</c> rows), in respec-count order; empty when
+        /// the catalog has none, and then no respec is possible.</summary>
+        public IReadOnlyList<uint> RespecFees => _respecFees;
         private MagSkillCatalog() { }
         public static MagSkillCatalog Load(string path) => LoadForApplication(path, 20230);
         public static MagSkillCatalog LoadForApplication(string path, int applicationId)
@@ -121,11 +125,50 @@ namespace Server.Medius
                     }
                     result._skills.Add(id, skill);
                 }
+                if (table.TryGetProperty("ReSpec", out var respec)) result._respecFees = LoadRespecFees(respec);
                 if (result._skills.Count == 0 || result._tiers.Count == 0) throw new InvalidDataException("Empty authored skill catalog.");
                 return result;
             }
             catch (Exception e) when (e is JsonException || e is KeyNotFoundException || e is InvalidOperationException || e is FormatException || e is OverflowException)
             { throw new InvalidDataException("Invalid skill catalog JSON/schema.", e); }
+        }
+        // Rows MagCharacterSkillReSpec0..N-1, each with one Points value: the fee for the respec after that many.
+        private static uint[] LoadRespecFees(JsonElement respec)
+        {
+            const string prefix = "MagCharacterSkillReSpec";
+            var fees = new SortedDictionary<int, uint>();
+            foreach (var entry in respec.EnumerateObject())
+            {
+                if (!entry.Name.StartsWith(prefix, StringComparison.Ordinal) ||
+                    !int.TryParse(entry.Name.Substring(prefix.Length), System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out int index) ||
+                    index > 255 || !fees.TryAdd(index, entry.Value.GetProperty("MagCharacterSkillReSpec").GetProperty("Points").GetUInt32()))
+                    throw new InvalidDataException("Invalid authored respec fee row.");
+            }
+            if (fees.Count == 0 || fees.Keys.Last() != fees.Count - 1) throw new InvalidDataException("Authored respec fee rows must be numbered from 0 without gaps.");
+            return fees.Values.ToArray();
+        }
+        /// <summary>The fee for a character's next respec after <paramref name="respecCount"/> earlier ones: that row
+        /// of the authored table, or its last row once the count runs past it. False when the catalog has no fees.</summary>
+        public bool TryRespecFee(byte respecCount, out uint fee)
+        {
+            fee = 0;
+            if (_respecFees.Length == 0) return false;
+            fee = _respecFees[Math.Min(respecCount, _respecFees.Length - 1)];
+            return true;
+        }
+        /// <summary>What a respec gives back for <paramref name="ownedSkills"/>: each defined skill's authored cost and
+        /// the equipment that skill awarded <paramref name="faction"/>. Bits naming no defined skill refund nothing.</summary>
+        internal (int Points, int[] Equipment) RespecRefund(byte faction, uint[] ownedSkills)
+        {
+            int points = 0; var equipment = new SortedSet<int>();
+            if (faction > 2 || ownedSkills == null || ownedSkills.Length != 5) return (0, Array.Empty<int>());
+            foreach (var (id, skill) in _skills)
+            {
+                if (!Has(ownedSkills, id)) continue;
+                points += skill.Cost;
+                equipment.UnionWith(skill.Equipment[faction]);
+            }
+            return (points, equipment.ToArray());
         }
         public bool RequiresPurchaseOwnership(int itemId) => _purchaseEquipment.Contains(itemId);
         /// <summary>True when a skill available to <paramref name="faction"/> can set this ownership index.</summary>

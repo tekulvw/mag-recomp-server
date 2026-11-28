@@ -83,8 +83,21 @@ namespace Server.Medius
         /// <summary>A deleted character's name before the deletion moved it aside; null otherwise.</summary>
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public string OriginalName { get; set; }
+        /// <summary>Skill respecs the character has taken (retail RespecCount); null for none. It selects the next fee.</summary>
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public byte? RespecCount { get; set; }
+        /// <summary>The character's stored respec point balance (retail RespecPoints); null for none. An operator
+        /// floor (<see cref="LocalCharacterStore.RespecPointsFloor"/>) is applied when the record is built, not here.</summary>
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public uint? RespecPoints { get; set; }
         [JsonIgnore]
         public bool Deleted => DeletedAt != null;
+        [JsonIgnore]
+        internal uint? RecordRespecPointsFloor { get; set; }
+        /// <summary>The respec points the character can spend: its stored balance, raised to the operator floor
+        /// when one is set. A balance above the floor is kept.</summary>
+        [JsonIgnore]
+        public uint AvailableRespecPoints => Math.Max(RespecPoints ?? 0, RecordRespecPointsFloor ?? 0);
         [JsonIgnore]
         internal MagProgressionCatalog RecordProgressionCatalog { get; set; }
         [JsonIgnore]
@@ -103,6 +116,7 @@ namespace Server.Medius
                 LeadershipPoints = Leadership?.LeadershipPoints ?? 0,
                 LeadershipNominations = Leadership?.Nominations ?? 0,
                 MatchesSinceLastCommand = Leadership?.MatchesSinceLastCommand ?? 0,
+                RespecCount = RespecCount ?? 0, RespecPoints = AvailableRespecPoints,
                 AvailableItems = MergeMask(grants?.AvailableItems, UnlockedItems, 24), Skills = MergeMask(grants?.Skills, OwnedSkills, 5),
                 Loadouts = Loadouts?.Select(row => row.ToLoadout()).ToArray() ?? RecordCatalog?.DefaultsForFaction(Faction) ??
                     Enumerable.Range(0, 5).Select(_ => new MagLoadout()).ToArray()
@@ -346,6 +360,10 @@ namespace Server.Medius
         // earned it (threshold XP and every gained level's skill points). Only new completions are
         // affected; the completed flag stays the receipt. Null keeps the catalog's bonus alone.
         public byte? TrainingLevel { get; set; }
+        /// <summary>Operator policy (MAG_RESPEC_POINTS_FLOOR): every character has at least this many respec points
+        /// whenever its record is built (at login, on the character screens and after a respec), so a spend is topped
+        /// back up. Applied on read; the stored balance is unchanged and a higher one is kept. Null leaves balances as stored.</summary>
+        public uint? RespecPointsFloor { get; set; }
         private readonly ICharacterStoreCommitter _committer;
         // Where characters persist: the JSON file below, or PostgreSQL (LocalCharacterStore.Postgres.cs).
         // Every rule in this class runs unchanged against either; a backend only loads and saves.
@@ -401,6 +419,7 @@ namespace Server.Medius
         {
             character.RecordCatalog = LoadoutCatalog;
             character.RecordInitialSkillPoints = InitialSkillPoints;
+            character.RecordRespecPointsFloor = RespecPointsFloor;
             character.RecordProgressionCatalog = ProgressionCatalog;
             if (ProgressionCatalog != null && (character.Level ?? 1) != ProgressionCatalog.LevelForExperience(character.Experience ?? 0))
                 throw new InvalidDataException("Persisted XP/level does not match the progression catalog.");

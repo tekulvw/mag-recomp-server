@@ -122,6 +122,36 @@ namespace Server.Medius
                 ObserveActivity(now);
                 return new[] { MagPluginRouting.ToMlsClient(response, ApplicationId) };
             }
+            if (message is MagRetailSkillRespecRequest && ApplicationId == 20231 && State == SessionState.Ready)
+            {
+                // Every request is answered: a refusal is a bare failure bit, which the client reads without a record.
+                var response = new MagRetailSkillRespecResponse();
+                try
+                {
+                    if (CharacterStore != null && CharacterId != 0 && MagDevelopmentAccountPolicy.ValidAccount(AuthenticatedAccount))
+                    {
+                        var outcome = CharacterStore.RespecSkillsForAccount(AuthenticatedAccount, CharacterId);
+                        StorageStatus = outcome.Result == MagNetResult.Success
+                            ? $"{outcome.Reason}/fee={outcome.Fee}/refunded={outcome.RefundedSkillPoints}" : outcome.Reason;
+                        if (outcome.Result == MagNetResult.Success)
+                        {
+                            response.Success = true; response.Record = outcome.Record;
+                            // The kits were rebuilt: a character already in a match gets them as after an Armory edit.
+                            LoadoutRefreshStatus = "not-scheduled";
+                            if (LoadoutCommitted != null)
+                            {
+                                try { LoadoutCommitted(AuthenticatedAccount, CharacterId); LoadoutRefreshStatus = "notified"; }
+                                catch (Exception) { LoadoutRefreshStatus = "notification-failed-after-commit"; }
+                            }
+                        }
+                    }
+                    else StorageStatus = "respec-identity-or-store-unavailable";
+                }
+                catch (Exception e) when (e is IOException || e is InvalidDataException || e is UnauthorizedAccessException)
+                { StorageStatus = "respec-storage-error-no-success"; }
+                ObserveActivity(now);
+                return new[] { MagPluginRouting.ToMlsClient(response, ApplicationId) };
+            }
             if (message is MagRetailNominationsUpdate nominations && State == SessionState.Ready)
             {
                 // The client sends its volunteer preference and then its join request without

@@ -25,7 +25,7 @@ namespace RT.Models.MAG
             if (TryParseForApplication(payload, applicationId, out message) && (message is MagRetailPartyInvite || message is MagRetailPartyInviteResponse ||
                 message is MagRetailPartyLeave || message is MagRetailPartyOpenInvite || message is MagRetailPartyRejoinRequest || message is MagRetailCancelJoinRequest || message is MagTrainingCompletedRequest || message is MagKeepAlive || message is MagJoinGameRequest || message is MagServerStatusRequest || message is MagHello || message is MagProtocolInfo || message is MagAccountLoginRequest || message is MagCharacterDataRequest ||
                 message is MagNpAuthenticateRequest || message is MagUniverseListRequest || message is MagRetailPatchRequest || message is MagRetailAccountLogoutRequest ||
-                message is MagNewsEulaRequest || message is MagCharacterListRequest || message is MagCreateCharacterRequest || message is MagDeleteCharacterRequest || message is MagLoadoutUpdateRequest || message is MagRetailLoadoutDeleteRequest || message is MagPurchaseSkillRequest || message is MagRetailNominationsUpdate ||
+                message is MagNewsEulaRequest || message is MagCharacterListRequest || message is MagCreateCharacterRequest || message is MagDeleteCharacterRequest || message is MagLoadoutUpdateRequest || message is MagRetailLoadoutDeleteRequest || message is MagPurchaseSkillRequest || message is MagRetailSkillRespecRequest || message is MagRetailNominationsUpdate ||
                 message is MagRetailPlayerOnlineRequest || message is MagRetailPlayerGameInfoRequest)) return true;
             message = null;
             return false;
@@ -95,6 +95,8 @@ namespace RT.Models.MAG
                     0x0035 => new MagUniverseListResponse(),
                     0x0250 => new MagPurchaseSkillRequest(),
                     0x0251 => new MagPurchaseSkillResponse(),
+                    0x0254 when applicationId == 20231 => new MagRetailSkillRespecRequest(),
+                    0x0255 when applicationId == 20231 => new MagRetailSkillRespecResponse(),
                     0x021f => new MagLoadoutUpdateRequest(),
                     0x0220 => new MagLoadoutUpdateResponse(),
                     0x0221 when applicationId == 20231 => new MagRetailLoadoutDeleteRequest(),
@@ -126,6 +128,12 @@ namespace RT.Models.MAG
                         break;
                     case MagPurchaseSkillResponse purchase:
                         purchase.Success = reader.ReadBoolean(); purchase.Record = ReadRecord(reader, itemBits, applicationId == 20231);
+                        break;
+                    case MagRetailSkillRespecRequest _:
+                        break;
+                    case MagRetailSkillRespecResponse respec:
+                        respec.Success = reader.ReadBoolean();
+                        respec.Record = respec.Success ? ReadRecord(reader, itemBits, true) : new MagCharacterRecord();
                         break;
                     case MagLoadoutUpdateRequest update:
                         update.LoadoutIndex = reader.ReadByte();
@@ -325,7 +333,8 @@ namespace RT.Models.MAG
         // Shared full-record/update types must use the application's explicit serializer at session boundaries.
         public static byte[] Serialize(MagMessage message) =>
             SerializeForApplication(message, message is MagRetailPartyMessage || message is MagTrainingCompletedRequest || message is MagRetailCharacterListResponse || message is MagRetailAccountLoginRequest || message is MagRetailAccountLoginResponse || message is MagRetailJoinGameRequest || message is MagRetailJoinGameResponse || message is MagRetailLoadoutDeleteRequest or MagRetailLoadoutDeleteResponse || message is MagRetailAccountLogoutRequest or MagRetailAccountLogoutResponse ||
-                message is MagRetailPlayerOnlineRequest or MagRetailPlayerOnlineResponse or MagRetailPlayerGameInfoRequest or MagRetailPlayerGameInfoResponse ? 20231 : 20230);
+                message is MagRetailPlayerOnlineRequest or MagRetailPlayerOnlineResponse or MagRetailPlayerGameInfoRequest or MagRetailPlayerGameInfoResponse ||
+                message is MagRetailSkillRespecRequest or MagRetailSkillRespecResponse ? 20231 : 20230);
 
         public static byte[] SerializeForApplication(MagMessage message, int applicationId)
         {
@@ -345,6 +354,8 @@ namespace RT.Models.MAG
                 throw new ArgumentException("Queue message is retail-only.",nameof(message));
             if (message is MagRetailPartyMessage && applicationId != 20231)
                 throw new ArgumentException("Party messages are retail-only.", nameof(message));
+            if (message is (MagRetailSkillRespecRequest or MagRetailSkillRespecResponse) && applicationId != 20231)
+                throw new ArgumentException("Skill respec messages are retail-only.", nameof(message));
             if (message is (MagRetailLoadoutDeleteRequest or MagRetailLoadoutDeleteResponse) && applicationId != 20231)
                 throw new ArgumentException("Loadout delete messages are retail-only.", nameof(message));
             if (message is (MagRetailAccountLogoutRequest or MagRetailAccountLogoutResponse) && applicationId != 20231)
@@ -384,6 +395,12 @@ namespace RT.Models.MAG
                     break;
                 case MagPurchaseSkillResponse purchase:
                     writer.WriteBoolean(purchase.Success); WriteRecord(writer, purchase.Record, itemBits, applicationId == 20231);
+                    break;
+                case MagRetailSkillRespecRequest _:
+                    break;
+                case MagRetailSkillRespecResponse respec:
+                    writer.WriteBoolean(respec.Success);
+                    if (respec.Success) WriteRecord(writer, respec.Record, itemBits, true);
                     break;
                 case MagLoadoutUpdateRequest update:
                     if (update.LoadoutIndex >= 5) throw new ArgumentException("Invalid loadout index.");
