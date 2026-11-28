@@ -63,8 +63,62 @@ local policy; their meanings and accepted native defaults remain unknown.
 
 **This is not native-client acceptance or a gameplay activation contract.**
 Queue/status/clan/party wire formats and training rewards remain unqualified under1793, and no old
-codec fallback is allowed for them. A qualified2.12 character catalog set and
-client boot readiness are still required before any live acceptance run.
+codec fallback is allowed for them. The explicit bootstrap catalog profile below
+supports the first authentication-only test; client boot readiness and the
+deployment owner's ready handoff are still required before live acceptance.
+
+## Authentication-only character catalogs
+
+Protocol 1793 startup requires `MAG_CHARACTER_BOOTSTRAP_PROFILE`. The maintained
+extractor reads the exact supported engine and three effective resource files:
+
+```sh
+python3 tools/extraction/extract-retail-v212-bootstrap.py \
+  --engine /external/input/engine.elf \
+  --headers /external/input/data_scripts_headers.zrb \
+  --classes /external/input/character_class.zrb \
+  --equipment /external/input/equipment_headers.zrb \
+  --output-dir /external/private/new-bootstrap
+```
+
+The output directory must be new. All source SHA256 values are checked before
+writing; foreign inputs and output overwrites fail. The bounded reflective
+reader retains unknown layouts as opaque values, and projection rejects opaque
+progression fields. No original inputs or generated catalogs belong in public
+Git, CI artifacts or container layers. Public tests use invented resources.
+
+Mount the three generated files as siblings and set absolute paths:
+
+```text
+MAG_CHARACTER_BOOTSTRAP_PROFILE=/data/retail-v212-bootstrap-profile.json
+MAG_RETAIL_ARMORY_CATALOG=/data/retail-v212-bootstrap-armory.json
+MAG_PROGRESSION_CATALOG=/data/retail-v212-bootstrap-progression.json
+MAG_LOCAL_DME=0
+```
+
+The profile binds app 20231/protocol 1793, exact engine/resource identities and
+both catalog content hashes. Startup checks the same bytes supplied to the
+existing Armory/progression consumers before opening the database or listeners.
+It rejects a missing profile, altered catalogs, a gameplay DME or world registry,
+legacy skill/training catalogs, training-level overrides and respec overrides.
+Omit `MAG_WORLD_REGISTRY`, `MAG_RETAIL_SKILL_CATALOG`,
+`MAG_TRAINING_COMPLETION_CATALOG`, `MAG_TRAINING_LEVEL`,
+`MAG_RESPEC_POINTS_FLOOR` and `MAG_RESPEC_FEE_CAP`. Omit
+`MAG_STARTING_LEVEL` or set it to 1. Keep gameplay Deployments at zero replicas.
+
+The selected **operator policy** starts at level 1 with zero additional skill or
+leadership points, three authored starter inventories and two cleared wire
+inventories per faction, update IDs 1, and ownership of the starter-item union.
+There are no purchased-skill grants. Actual authored level grants still apply;
+zero additional points does not mean zero total points. No old skill Tiers or
+training catalog is synthesized. The private manifest retains static diagnostic
+qualification and `native_acceptance: false`, including residual uncertainty
+about live item vectors, native identity canonicalization and postload helpers.
+These offline checks do not establish native creation/login acceptance.
+
+The deployment owner can package only these three JSON files using the existing
+private data-bundle format. Pin its archive digest, member digests and immutable
+storage version alongside the image/source pins in the private rollout receipt.
 
 The homelab chat owns the separate `mag-212` test deployment and its own storage,
 private DNS, portal audience/status and network policy matching modes. Existing
@@ -72,7 +126,7 @@ accounts, services and mutable stores remain separate. Recomp owns native
 launcher/engine readiness. Coordinate credentials through the existing secret
 workflow, never source commits or public PR bodies.
 
-The planned first native test uses app20231/protocol1793 and fresh isolated
+The planned first native test uses app 20231/protocol 1793 and fresh isolated
 test identity selected in private coordination. The client owner has qualified the original2.12 local-name
 setter and no-ticket path. Only the mag-212 instance may use the existing explicit
 `MAG_PORTAL_TICKETS=off` development-name policy for that test; preserve every

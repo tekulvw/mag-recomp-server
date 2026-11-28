@@ -58,11 +58,16 @@ namespace Server.Medius
         private MagProgressionCatalog() { }
         public static MagProgressionCatalog Load(string path, int applicationId = 20230)
         {
+            if (!Path.IsPathFullyQualified(path)) throw new InvalidDataException("An absolute progression catalog path is required.");
+            if (new FileInfo(path).Length > 2097152) throw new InvalidDataException("Progression catalog exceeds local bound.");
+            return LoadBytes(File.ReadAllBytes(path), applicationId);
+        }
+        internal static MagProgressionCatalog LoadBytes(byte[] bytes, int applicationId)
+        {
             try
             {
-                if (!Path.IsPathFullyQualified(path)) throw new InvalidDataException("An absolute progression catalog path is required.");
-                if (new FileInfo(path).Length > 2097152) throw new InvalidDataException("Progression catalog exceeds local bound.");
-                using var document = JsonDocument.Parse(File.ReadAllBytes(path));
+                if (bytes == null || bytes.Length > 2097152) throw new InvalidDataException("Progression catalog exceeds local bound.");
+                using var document = JsonDocument.Parse(bytes);
                 var root = document.RootElement;
                 if (root.GetProperty("schema_version").GetInt32() != 1 || (applicationId != 20230 && applicationId != 20231) || root.GetProperty("application_id").GetInt32() != applicationId)
                     throw new InvalidDataException("Unsupported progression catalog schema/application.");

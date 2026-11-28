@@ -186,6 +186,23 @@ namespace Server.Medius
         }
         internal static void LoadCharacterCatalog()
         {
+            if (Settings.MagProtocolVersion == 1793 ||
+                !string.IsNullOrEmpty(Environment.GetEnvironmentVariable(MagRetail212BootstrapProfile.ProfileVariable)))
+            {
+                var bootstrap = MagRetail212BootstrapProfile.Load(Settings.MagApplicationId,
+                    Settings.MagProtocolVersion, Environment.GetEnvironmentVariable);
+                LoadoutCatalog = bootstrap.Armory;
+                ProgressionCatalog = bootstrap.Progression;
+                InitialSkillPoints = ProgressionCatalog.InitialSkillPoints;
+                StartingLevel = 1;
+                SkillCatalog = null;
+                TrainingCompletionCatalog = null;
+                TrainingLevel = null;
+                RespecPointsFloor = null;
+                RespecFeeCap = null;
+                OpenMatchRowTtl = ParseOpenMatchRowTtl(Environment.GetEnvironmentVariable("MAG_REWARD_LEDGER_OPEN_MATCH_TTL_HOURS"));
+                return;
+            }
             string trainingCatalog = Environment.GetEnvironmentVariable("MAG_TRAINING_COMPLETION_CATALOG");
             TrainingCompletionCatalog = string.IsNullOrEmpty(trainingCatalog) ? null : MagTrainingCompletionCatalog.Load(trainingCatalog);
             string progressionCatalog = Environment.GetEnvironmentVariable("MAG_PROGRESSION_CATALOG");
