@@ -366,10 +366,34 @@ joiners receive the current definition, aim and owner. When the Structural
 objective deactivates the field hospital, the gunner dies with the other
 occupants and the grant is revoked; the following repair restores a mountable
 turret. The worker reports `acquisition_hospital_turrets_validated` once a
-profile binds them. Hospital secondary rockets need Domination projectile
-contacts and are not bound for Acquisition, and bots do not use hospital
-turrets in either mode. Turret aim, firing and seating on a live client remain
-a lab check.
+profile binds them. Bots do not use hospital turrets in either mode. Turret
+aim, firing and seating on a live client remain a lab check.
+
+### Field-hospital rockets
+
+The emplacement's secondary is the same rocket launcher as a Domination
+hospital's: a two-round salvo, a one-second refire and a ten-second reload with
+endless magazines (the retail weapon properties, read by the projector). Set
+`hospital_rockets` next to `hospital_turrets` and `projectile_contacts` to
+serve it; the configuration refuses rockets without both. The rules come from
+`tools/extraction/project-retail-hospital-rockets.py --mode acquisition`, with
+the same inputs as the turret projector's Acquisition mode plus
+`--hospital-turrets` (the Acquisition turret rules it binds). It writes the
+`mag_acquisition_hospital_rockets_v1` schema, which binds only Acquisition
+turret rules, as the Domination schema binds only Domination ones.
+
+The launch, cadence, magazine, flight and cleanup are the Domination hospital
+path (see [Hospital secondary rockets](hospital-secondary-rockets.md)). The
+flight sweeps the Acquisition contact world, and the terminal damages
+Characters and, when `frag_ground_areas` is set, the Escort and APCs through the
+infantry rocket's Acquisition equipment blast. Field hospitals, Structural
+objectives and Helos are not rocket targets here.
+
+Without `hospital_rockets` the worker refuses each bunker rocket
+(`projectile_requires_living_on_foot_character`) and never creates or removes
+the projectile. The native client then keeps its projectile slot, so after
+four refused rockets it stops sending launches at all, although the turret
+still shows rockets loaded.
 
 ## Parachute drops
 

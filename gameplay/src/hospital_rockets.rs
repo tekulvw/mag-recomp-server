@@ -1,4 +1,8 @@
-//! Source-qualified rules for Domination hospital secondary rockets.
+//! Source-qualified rules for hospital secondary rockets.
+//!
+//! Domination hospitals and Acquisition field hospitals carry the same three
+//! faction emplacement variants. Each mode's rocket rules bind that mode's
+//! own hospital turret rules under a matching schema.
 
 use crate::item_catalog::ItemCatalog;
 use serde::{Deserialize, de::IgnoredAny};
@@ -214,9 +218,16 @@ impl Catalog {
         let hospital: HospitalRules = serde_json::from_slice(hospital_rules)
             .map_err(|_| "invalid_hospital_rocket_hospital_rules")?;
         let provenance = items.retail_combat()?.provenance();
-        if rules.schema != "mag_domination_hospital_rockets_v1"
-            || hospital.schema != "mag_domination_hospital_turrets_v1"
-            || items.application_id() != 20231
+        if !matches!(
+            (rules.schema.as_str(), hospital.schema.as_str()),
+            (
+                "mag_domination_hospital_rockets_v1",
+                "mag_domination_hospital_turrets_v1"
+            ) | (
+                "mag_acquisition_hospital_rockets_v1",
+                "mag_acquisition_hospital_turrets_v1"
+            )
+        ) || items.application_id() != 20231
             || !rules.source.matches(
                 &hospital.source,
                 hospital_rules,
@@ -671,6 +682,25 @@ pub(crate) mod tests {
             );
         }
         assert!(catalog.secondary_for(3, 0).is_none());
+    }
+
+    #[test]
+    fn catalog_binds_each_mode_only_to_its_own_hospital_turret_schema() {
+        let mut fixture = Fixture::new();
+        fixture.hospital["schema"] = json!("mag_acquisition_hospital_turrets_v1");
+        fixture.bind_changed_hospital();
+        assert_eq!(
+            fixture.load().unwrap_err(),
+            "hospital_rocket_source_mismatch"
+        );
+        fixture.rules["schema"] = json!("mag_acquisition_hospital_rockets_v1");
+        assert_eq!(fixture.load().unwrap().variants().len(), 3);
+        fixture.hospital["schema"] = json!("mag_domination_hospital_turrets_v1");
+        fixture.bind_changed_hospital();
+        assert_eq!(
+            fixture.load().unwrap_err(),
+            "hospital_rocket_source_mismatch"
+        );
     }
 
     #[test]
