@@ -571,3 +571,6 @@ fn an_apc_that_no_squad_spawns_at_seats_anyone_on_its_side() {
         2
     );
 }
+
+#[path = "vehicle_collision_tests.rs"]
+mod vehicle_collision;

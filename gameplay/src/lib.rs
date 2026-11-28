@@ -272,6 +272,7 @@ pub mod telemetry;
 pub mod tick_timing;
 pub mod turret;
 pub mod underbarrel_launchers;
+pub mod vehicle_collision;
 pub mod vehicle_exit;
 pub mod wire_profile;
 pub mod worker_drain;
@@ -1388,6 +1389,9 @@ struct Active {
     /// The seat the current dead life left; see seated_death.rs.
     terminal_seat: Option<seated_death::SeatIdentity>,
     last_exit: Option<protocol::DismountSeat>,
+    /// The ground vehicle this character last left, and when. Its own vehicle
+    /// cannot run it over for a short grace period after it gets out.
+    ground_exit: Option<(u16, Duration)>,
     match_clock_started: Option<Duration>,
     last_clock_points: i16,
     round_scores: Option<[i16; 2]>,
@@ -1562,6 +1566,7 @@ pub struct Engine<W: Write> {
     // Source identity, world and activation-time team during a single strike.
     active_ability_damage_team: Option<(u32, u32, u8)>,
     fall_damage_rules: Option<fall_damage::Rules>,
+    vehicle_collision_rules: Option<vehicle_collision::Rules>,
     incapacitation_rules: Option<incapacitation::Rules>,
     character_damage_rules: Option<character_damage_rules::Rules>,
     firearm_assists: firearm_assists::State,
@@ -1575,6 +1580,15 @@ impl<W: Write> Engine<W> {
     pub fn with_fall_damage_rules(mut self, rules: fall_damage::Rules) -> Self {
         self.fall_damage_rules = Some(rules);
         self
+    }
+    /// Opt in to ground-vehicle impact damage with caller-loaded rules.
+    pub fn with_vehicle_collision_rules(
+        mut self,
+        rules: vehicle_collision::Rules,
+    ) -> Result<Self, &'static str> {
+        rules.validate()?;
+        self.vehicle_collision_rules = Some(rules);
+        Ok(self)
     }
     pub fn with_skill_catalog(mut self, catalog: skill_catalog::SkillCatalog) -> Self {
         self.skill_catalog = Some(catalog);

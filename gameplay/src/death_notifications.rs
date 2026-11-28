@@ -398,6 +398,31 @@ impl<W: Write> Engine<W> {
         })
     }
 
+    /// A ground vehicle hit an on-foot character. Retail names its Vehicle
+    /// source type and the vehicle's object ID as the source index, and
+    /// credits the driver.
+    pub(super) fn plan_vehicle_impact_death_notice(
+        &self,
+        world: u32,
+        victim: u16,
+        driver: u32,
+        vehicle_object_id: u32,
+        source_type: u8,
+    ) -> Result<CharacterEffectNotice, &'static str> {
+        if self.wire_profile.application_id() != 20231 || source_type != 3 {
+            return Err("unsupported_vehicle_impact_death_source");
+        }
+        self.character_effect_notice(CharacterEffectNoticeRequest {
+            world,
+            victim,
+            attacker: driver,
+            source_type: u32::from(source_type),
+            source_index: vehicle_object_id as i32,
+            location: 0,
+            mounted: protocol::VictimWasMounted::NoAssociatedVehicle,
+        })
+    }
+
     pub(crate) fn plan_character_effect_notice(
         &self,
         request: CharacterEffectNoticeRequest,

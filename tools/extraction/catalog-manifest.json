@@ -241,6 +241,19 @@
       "limitations": "Reads authored server.zpr fields and supported-build scalar offsets only. No DEV ELF, disassembly/DWARF subprocess, debug-string copies or native instruction literals are bundled/generated. Fixed hash/layout support; not generic new-build analysis."
     },
     {
+      "output": "retail-vehicle-collision.json",
+      "status": "direct",
+      "command": "extract-retail-vehicle-collision.py --elf RETAIL_ELF --game-archive GAME_ARCHIVE --output VEHICLE_COLLISION_RULES",
+      "inputs": "Exact supported decrypted original retail PPC64 big-endian ELF and retail game archive (both SHA256 checked)",
+      "dependencies": [
+        "Python 3.11+ standard library",
+        "tools/collision/archive.py",
+        "tools/collision/packfile.py",
+        "extract-item-catalog.py"
+      ],
+      "limitations": "Reads two authored server.zpr fields and supported-build scalar operands (checked against their expected instruction encodings) only. No disassembly or native code is bundled or generated. Fixed hash/layout support; not generic new-build analysis."
+    },
+    {
       "output": "retail-incapacitation.json",
       "status": "direct",
       "command": "extract-retail-incapacitation-rules.py --game-archive GAME_ARCHIVE --output INCAPACITATION_RULES; project-retail-combat-incapacitation.py --combat COMBAT --item-catalog ITEMS --output COMBAT_WITH_DOWNED_BODY",
