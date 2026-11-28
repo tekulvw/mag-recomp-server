@@ -389,6 +389,21 @@ impl Configuration {
         Ok(value)
     }
 
+    /// Mark the catalog's permanent secure-and-hold completions from this
+    /// configuration's authored structural sequences (see
+    /// docs/domination-permanent-completions.md). Returns the marked indices.
+    pub fn mark_permanent_completions(
+        &self,
+        objectives: &mut ObjectiveCatalog,
+    ) -> io::Result<Vec<u16>> {
+        let raw = String::from_utf8(read(&self.structural_effects, 2 * 1024 * 1024)?)
+            .map_err(io::Error::other)?;
+        let effects = StructuralEffects::from_json(&raw).map_err(io::Error::other)?;
+        objectives
+            .mark_permanent_completions(effects.permanent_completions())
+            .map_err(io::Error::other)
+    }
+
     /// Validate the existing source-bound controller, schedule, FSP and
     /// Structural assets for the chosen profile before preparing the world.
     pub fn load_sources(
@@ -422,6 +437,16 @@ impl Configuration {
         )
         .map_err(io::Error::other)?;
         let catalog = StructuralEffects::from_json(&raw).map_err(io::Error::other)?;
+        // The world must start from a catalog marked with these same sources.
+        let mut expected = (*objectives).clone();
+        let permanent = expected
+            .mark_permanent_completions(catalog.permanent_completions())
+            .map_err(io::Error::other)?;
+        if permanent != objectives.permanent_completions() {
+            return Err(io::Error::other(
+                "domination_permanent_completions_unmarked",
+            ));
+        }
         let sequence_assets = SequenceCollisionAssets::load(&self.sequence_assets, &catalog)
             .map_err(io::Error::other)?;
         let initial: Assignments =
@@ -1088,10 +1113,22 @@ impl<W: Write> Engine<W> {
                 "domination_gameplay_requires_idle_source_resources",
             ));
         }
-        let objectives =
-            Arc::new(self.objective_catalog.clone().ok_or_else(|| {
-                io::Error::other("domination_gameplay_requires_objective_catalog")
-            })?);
+        let catalog = self
+            .objective_catalog
+            .as_mut()
+            .ok_or_else(|| io::Error::other("domination_gameplay_requires_objective_catalog"))?;
+        config.mark_permanent_completions(catalog)?;
+        if self
+            .objective_world
+            .as_ref()
+            .is_some_and(|world| !world.is_pristine())
+        {
+            return Err(io::Error::other(
+                "domination_gameplay_requires_pristine_objective_world",
+            ));
+        }
+        self.objective_world = Some(crate::objective_control::ObjectiveWorld::new(catalog));
+        let objectives = Arc::new(catalog.clone());
         let spawns = self
             .spawn_catalog
             .as_mut()
@@ -1454,6 +1491,56 @@ mod tests {
         );
         std::fs::remove_file(&file).unwrap();
         std::fs::remove_dir(&directory).unwrap();
+    }
+
+    #[test]
+    fn permanent_completions_mark_the_catalog_from_the_configured_effects() {
+        let directory = std::env::temp_dir().join(format!(
+            "mag-domination-permanent-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir(&directory).unwrap();
+        let file = directory.join("config.json");
+        let value = json!({"format":"mag_domination_gameplay_configuration_v1",
+            "schema_version":1, "controller":"controller.json", "mission_start":"start.json",
+            "sim_schedule":"schedule.json", "forward_spawns":"fsp.json",
+            "structural_effects":"effects.json", "sequence_assets":"assets",
+            "initial_assignments":"assignments.json", "core":core()});
+        std::fs::write(&file, serde_json::to_vec(&value).unwrap()).unwrap();
+        let effects = crate::domination_structural_effects::tests::profile();
+        std::fs::write(
+            directory.join("effects.json"),
+            serde_json::to_vec(&effects).unwrap(),
+        )
+        .unwrap();
+        let config = Configuration::load(&file).unwrap();
+        let mut raw = crate::objective_control::trigger_box_tests::native_catalog();
+        raw["objects"][0]["token"] = "0x00000011".into();
+        let mut catalog = ObjectiveCatalog::from_json(&raw.to_string()).unwrap();
+        assert!(catalog.permanent_completions().is_empty());
+        assert_eq!(
+            config.mark_permanent_completions(&mut catalog).unwrap(),
+            [10]
+        );
+        assert_eq!(catalog.permanent_completions(), [10]);
+        // A placement the catalog does not bind is refused, not ignored.
+        let mut unbound = ObjectiveCatalog::from_json(
+            &crate::objective_control::trigger_box_tests::native_catalog().to_string(),
+        )
+        .unwrap();
+        assert_eq!(
+            config
+                .mark_permanent_completions(&mut unbound)
+                .err()
+                .unwrap()
+                .to_string(),
+            "unbound_permanent_completion_objective"
+        );
+        std::fs::remove_dir_all(&directory).unwrap();
     }
 
     #[test]

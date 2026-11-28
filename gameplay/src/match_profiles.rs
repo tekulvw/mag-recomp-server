@@ -410,7 +410,7 @@ impl Registry {
             {
                 return Err(io::Error::other("match_profile_capacity_mismatch"));
             }
-            let objectives = source
+            let mut objectives = source
                 .objective_catalog
                 .as_ref()
                 .map(objective_catalog::ObjectiveCatalog::load)
@@ -727,14 +727,15 @@ impl Registry {
                         "domination_gameplay_requires_source_world_resources",
                     ));
                 }
-                let objectives =
-                    Arc::new(objectives.clone().ok_or_else(|| {
-                        io::Error::other("domination_gameplay_requires_objectives")
-                    })?);
+                let config = domination_gameplay_config::Configuration::load(path)?;
+                let catalog = objectives
+                    .as_mut()
+                    .ok_or_else(|| io::Error::other("domination_gameplay_requires_objectives"))?;
+                config.mark_permanent_completions(catalog)?;
+                let objectives = Arc::new(catalog.clone());
                 let bunkers = bunkers
                     .as_ref()
                     .ok_or_else(|| io::Error::other("domination_gameplay_requires_hospitals"))?;
-                let config = domination_gameplay_config::Configuration::load(path)?;
                 let source = config.hospital_turret_source()?.map(Arc::from);
                 let rocket_source = config.hospital_rocket_source()?.map(Arc::from);
                 let ground_turret_source = config.ground_turret_source()?.map(Arc::from);
