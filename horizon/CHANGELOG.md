@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.15.1](https://github.com/tekulvw/mag-recomp-server/compare/medius-v0.15.0...medius-v0.15.1) (2026-11-28)
+
+
+### Bug Fixes
+
+* **medius:** answer MAS keepalives so a character delete keeps the connection ([#407](https://github.com/tekulvw/mag-recomp-server/issues/407)) ([aee0ed5](https://github.com/tekulvw/mag-recomp-server/commit/aee0ed5efa9aa467411080598068017572a974b3))
+
 ## [0.15.0](https://github.com/tekulvw/mag-recomp-server/compare/medius-v0.14.1...medius-v0.15.0) (2026-11-27)
 
 
