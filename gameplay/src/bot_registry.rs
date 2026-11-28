@@ -869,17 +869,10 @@ fn reserve_pose(
     feet: [f64; 3],
     body: bot_physics::Body,
 ) -> Result<(), &'static str> {
-    if body.shape.capsule().is_some() {
-        actors.insert_reserved_body(id, feet, grid_body(body))
-    } else {
-        actors.insert_reserved(
-            id,
-            crate::actor_collision::Bounds::body(feet, bot_physics::Body::default()),
-        )
-    }
+    actors.insert_reserved_body(id, feet, grid_body(body))
 }
 /// Reserve the space a bot's move covered: the capsule trail along its path
-/// for a capsule body, the swept box otherwise.
+/// for a capsule body, the swept box (keeping its current pose) otherwise.
 fn reserve_path(
     actors: &mut crate::actor_collision::ActorGrid,
     id: u16,
@@ -889,7 +882,12 @@ fn reserve_path(
     if body.shape.capsule().is_some() {
         actors.insert_reserved_path(id, &reservation.path, grid_body(body), reservation.bounds)
     } else {
-        actors.insert_reserved(id, reservation.bounds)
+        actors.insert_reserved_path(
+            id,
+            &reservation.path[1..],
+            grid_body(body),
+            reservation.bounds,
+        )
     }
 }
 pub(crate) fn human_in_actor_grid(a: &Active, now: Duration) -> bool {
@@ -1227,7 +1225,7 @@ impl<W: Write> Engine<W> {
         &self,
         now: Duration,
     ) -> Result<crate::actor_collision::ActorGrid, &'static str> {
-        use crate::actor_collision::{ActorGrid, Bounds};
+        use crate::actor_collision::ActorGrid;
         let mut grid = ActorGrid::with_probe_shape(self.bot_movement_body().shape);
         // Bodies take the runtime body's shape (a box unless a body profile
         // selects a capsule); only its dimensions matter here.
@@ -1274,9 +1272,11 @@ impl<W: Write> Engine<W> {
                         reserved.bounds,
                     )?;
                 } else {
-                    grid.insert_reserved(
+                    grid.insert_reserved_path(
                         bot.object_index,
-                        Bounds::body(physical, body).union(reserved.bounds),
+                        &[physical],
+                        body,
+                        reserved.bounds,
                     )?;
                 }
             } else {

@@ -3184,6 +3184,12 @@ impl NavigationMove {
                             // corridor always holds.
                             turns.push(((-1., 0.), side));
                         }
+                    } else {
+                        // A box face to face with another body (two bots
+                        // parted from an overlap end up so) has no clear
+                        // turn with any part of its course left in it:
+                        // it steps square to the side.
+                        turns.extend([((0., 1.), side), ((0., 1.), -side)]);
                     }
                     if holds {
                         turns.clear();

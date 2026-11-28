@@ -295,13 +295,13 @@ impl<'a> WorldTerrain<'a> {
             self.actor_touched.set(id);
         }
     }
-    /// Move a capsule body that overlaps other capsule bodies part of the way
-    /// out, at most `DEPENETRATION_MPS` for `h` seconds, sliding along static
-    /// geometry and other bodies (never into them). The box, a body overlapping
-    /// nothing, and a move the world cannot cover are left alone; contacts
-    /// made while parting are not reported.
+    /// Move a body that overlaps other bots' bodies (capsules, or the current
+    /// poses of box bots) part of the way out, at most `DEPENETRATION_MPS`
+    /// for `h` seconds, sliding along static geometry and other bodies (never
+    /// into them). A body overlapping nothing and a move the world cannot
+    /// cover are left alone; contacts made while parting are not reported.
     fn depenetrate(&self, position: Point, h: f64, b: Body, budget: &mut usize) -> Point {
-        let Some(query) = self.actors.filter(|_| b.is_capsule()) else {
+        let Some(query) = self.actors else {
             return position;
         };
         let Ok(Some(push)) = query.grid.separation(query.actor, position, b, budget) else {
@@ -320,10 +320,43 @@ impl<'a> WorldTerrain<'a> {
             return position;
         }
         let (contact, touched) = (self.actor_contact.get(), self.actor_touched.get());
-        let parted = self.slide(position, delta, b, budget);
+        let parted = if b.is_capsule() {
+            self.slide(position, delta, b, budget).map(|(p, _)| p)
+        } else {
+            self.step_aside(position, delta, b, budget)
+        };
         self.actor_contact.set(contact);
         self.actor_touched.set(touched);
-        parted.map_or(position, |(p, _)| p)
+        parted.unwrap_or(position)
+    }
+    /// A box's parting move: its flat bottom rests on the ground, so it
+    /// parts as a walking step does, lifted by up to a step, and comes back
+    /// down onto walkable ground; with none there it stays where it is.
+    fn step_aside(
+        &self,
+        position: Point,
+        delta: Point,
+        b: Body,
+        budget: &mut usize,
+    ) -> Result<Point, PhysicsError> {
+        let up = add(position, [0.0, b.max_step, 0.0]);
+        let top = match self.sweep(position, up, b, budget)? {
+            Some(hit) => stop_before(position, up, hit.fraction, b.skin),
+            None => up,
+        };
+        let (p, _) = self.slide(top, delta, b, budget)?;
+        let down = [p[0], position[1] - b.ground_snap, p[2]];
+        match self.sweep(p, down, b, budget)? {
+            Some(hit) => {
+                let feet = stop_before(p, down, hit.fraction, b.skin);
+                Ok(if self.stands_on(feet, &hit, b, budget)? {
+                    feet
+                } else {
+                    position
+                })
+            }
+            None => Ok(position),
+        }
     }
     /// Requires explicit source-verified coverage, including the complete body
     /// corridor and vertical step/snap margin. Triangle presence/bounds and global

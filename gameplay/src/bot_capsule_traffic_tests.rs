@@ -151,10 +151,23 @@ fn run_replanning(
     mesh: &Arc<navmesh::NavMesh>,
     trips: &[([f64; 3], [f64; 3])],
     seconds: f64,
-    mut replans: usize,
+    replans: usize,
 ) -> Vec<Option<f64>> {
-    let body = mesh.body().with_shape(capsule());
-    let grid_body = bot_physics::Body::default().with_shape(capsule());
+    run_shaped(world, mesh, trips, seconds, replans, capsule())
+}
+
+/// As `run_replanning`, for bots of any body `shape`. The default box is
+/// the shape a mesh without a body stamp gives its bots.
+fn run_shaped(
+    world: &collision::CollisionWorld,
+    mesh: &Arc<navmesh::NavMesh>,
+    trips: &[([f64; 3], [f64; 3])],
+    seconds: f64,
+    mut replans: usize,
+    shape: bot_physics::BodyShape,
+) -> Vec<Option<f64>> {
+    let body = mesh.body().with_shape(shape);
+    let grid_body = bot_physics::Body::default().with_shape(shape);
     let terrain = bot_physics::WorldTerrain::new(Some(world), MAP).unwrap();
     let mut grid = ActorGrid::default();
     let mut walkers: Vec<Walker> = trips
@@ -164,7 +177,16 @@ fn run_replanning(
             let route = mesh.route(start, goal, 0.3).unwrap();
             assert_eq!(route.status, navmesh::Status::Complete, "{i}");
             let motion = terrain.start_motion(route.projected_start, body).unwrap();
-            let motion = terrain.advance(motion, [0.; 3], 0.5, body).unwrap();
+            // Bodies already in the grid take part in settling, as the bots
+            // standing beside a new one do in the registry.
+            let motion = bot_physics::WorldTerrain::new(Some(world), MAP)
+                .unwrap()
+                .with_actors(Query {
+                    grid: &grid,
+                    actor: i as u16 + 1,
+                })
+                .advance(motion, [0.; 3], 0.5, body)
+                .unwrap();
             assert!(motion.grounded, "{i}: {motion:?}");
             grid.insert_reserved_body(i as u16 + 1, motion.position, grid_body)
                 .unwrap();
@@ -353,4 +375,87 @@ fn a_capsule_goal_may_rest_its_settle_lift_above_the_mesh() {
     assert!((goal_projection_offset(higher, projected, capsule) - 0.1f64.hypot(0.2)).abs() < 1e-9);
     let below = [10.1, 1.75, 10.];
     assert!((goal_projection_offset(below, projected, capsule) - 0.1f64.hypot(0.25)).abs() < 1e-12);
+}
+
+/// Two box bots standing inside each other's bodies (0.3 m apart, against
+/// the box's 0.7 m width), each with its route leading deeper into the
+/// other. The overlap may not hold them: they part and both arrive.
+#[test]
+fn an_overlapping_box_pair_separates_and_both_proceed() {
+    let (world, mesh) = arena(None);
+    let boxed = bot_physics::BodyShape::default();
+    for trips in [
+        // Each heads through the other.
+        [
+            ([4., 0., 5.], [15., 0., 5.]),
+            ([4.3, 0., 5.1], [1., 0., 5.]),
+        ],
+        // Both head the same way, one already inside the other.
+        [
+            ([4., 0., 5.], [15., 0., 4.]),
+            ([4.3, 0., 5.1], [15., 0., 6.]),
+        ],
+        // Each heads off on its own side (the live pair).
+        [
+            ([4., 0., 5.], [1., 0., 2.]),
+            ([4.26, 0., 5.04], [1., 0., 8.]),
+        ],
+    ] {
+        assert!(apart(trips[0].0, trips[1].0) < 0.7);
+        let arrived = run_shaped(&world, &mesh, &trips, 30., 8, boxed);
+        for (i, t) in arrived.iter().enumerate() {
+            assert!(t.is_some_and(|t| t < 15.), "{trips:?} bot {i}: {arrived:?}");
+        }
+    }
+}
+
+/// A box bot standing inside another one settles onto the floor (so the
+/// planner, which only routes grounded bots, takes it up again) and steps
+/// out of the other body while idle.
+#[test]
+fn an_idle_box_bot_inside_another_lands_and_parts() {
+    let (world, _) = arena(None);
+    let body = bot_physics::Body {
+        max_slope_degrees: 54.,
+        ..Default::default()
+    };
+    let mut grid = ActorGrid::default();
+    grid.insert_reserved_body(2, [4., 0., 5.], body).unwrap();
+    let terrain = bot_physics::WorldTerrain::new(Some(&world), MAP)
+        .unwrap()
+        .with_actors(Query {
+            grid: &grid,
+            actor: 1,
+        });
+    // Standing where it already overlaps (a placement query would refuse it).
+    let mut m = bot_physics::Motion::new([4.26, 0.05, 5.04]);
+    for _ in 0..8 {
+        m = terrain.advance(m, [0.; 3], 0.25, body).unwrap();
+    }
+    assert!(m.grounded, "{m:?}");
+    assert!(
+        (m.position[0] - 4.).abs() >= 0.7 - 1e-6 || (m.position[2] - 5.).abs() >= 0.7 - 1e-6,
+        "still inside: {m:?}"
+    );
+    assert!(!grid.occupied(1, m.position, body).unwrap());
+}
+
+/// Box bots meeting head on, from afar or already face to face (as a pair
+/// parted from an overlap stands), both get past each other.
+#[test]
+fn a_head_on_box_pair_passes_each_other_even_face_to_face() {
+    let (world, mesh) = arena(None);
+    let boxed = bot_physics::BodyShape::default();
+    for trips in [
+        [([2., 0., 5.], [17., 0., 5.]), ([17., 0., 5.], [2., 0., 5.])],
+        [
+            ([4., 0., 5.], [15., 0., 5.]),
+            ([4.75, 0., 5.1], [1., 0., 5.]),
+        ],
+    ] {
+        let arrived = run_shaped(&world, &mesh, &trips, 30., 8, boxed);
+        for (i, t) in arrived.iter().enumerate() {
+            assert!(t.is_some_and(|t| t < 15.), "{trips:?} bot {i}: {arrived:?}");
+        }
+    }
 }
