@@ -1137,3 +1137,143 @@ fn structure_gate_changes_route_again_without_probing_placements_again() {
     assert!(lane_receipts(&receipts) > 0);
     assert_eq!(engine.bot_registry.spawn_candidates.probes, probed);
 }
+
+/// The live case: an attacking squad's open parachute drop zone was routed
+/// only when a life asked for it at the wave. The answer was still pending
+/// then, so the life fell back to its population slot, and every structure
+/// gate change cleared it again before the next wave.
+#[test]
+fn an_open_drop_zone_is_routed_before_the_wave_so_attacker_lives_land_there() {
+    let actors = crate::actor_collision::ActorGrid::default();
+    let mut unprefetched = engine();
+    activate_forward(&mut unprefetched);
+    unprefetched.bot_spawn_routes.inline = false;
+    unprefetched.bot_spawn_routes.blocking = true;
+    let (choice, _) = choose(&mut unprefetched, &actors);
+    let fallback = spawned(choice);
+    assert_eq!(fallback.spawn_point, Some(HOME), "{fallback:?}");
+    assert_eq!(fallback.arrival, Arrival::PopulationSlot);
+
+    let mut engine = engine();
+    activate_forward(&mut engine);
+    engine.bot_spawn_routes.inline = false;
+    engine.bot_spawn_routes.blocking = true;
+    assert!(engine.bot_spawn_goals(SQUAD).is_empty());
+    engine.prefetch_bot_spawn_routes(Duration::ZERO, 1).unwrap();
+    assert!(
+        engine
+            .bot_spawn_routes
+            .pending
+            .contains(&SpawnRouteKey::Point(DROP, HOME)),
+        "the drop zone is queued before any life asks"
+    );
+    assert!(
+        !engine
+            .bot_spawn_routes
+            .pending
+            .contains(&SpawnRouteKey::Point(ALTERNATE, HOME)),
+        "points after the population slot are never tried"
+    );
+    engine.wait_bot_spawn_routes(1).unwrap();
+    let (choice, receipts) = choose(&mut engine, &actors);
+    let spawn = spawned(choice);
+    assert_eq!(spawn.spawn_point, Some(DROP), "{spawn:?}");
+    assert_eq!(spawn.arrival, Arrival::ParachuteLanding);
+    assert!(
+        receipts
+            .iter()
+            .any(|r| r["op"] == "bot_spawn_point_qualified" && r["spawn_point_index"] == DROP)
+    );
+}
+
+fn change_structure_gates(engine: &mut Engine<Vec<u8>>, revision: u32) {
+    let structures = std::sync::Arc::new(crate::bot_structure_collision::StructureObstacles::new(
+        &crate::domination_structural_world::SequenceCollisionState::default(),
+        revision,
+    ));
+    let mesh = engine.navmesh_world.clone().unwrap();
+    crate::navmesh_structure_gates::install_now(&mesh, Some(&structures)).unwrap();
+}
+
+#[test]
+fn a_structure_gate_change_keeps_the_drop_zone_and_revalidates_it_at_most_every_15_s() {
+    let actors = crate::actor_collision::ActorGrid::default();
+    let mut engine = engine();
+    activate_forward(&mut engine);
+    engine.bot_spawn_routes.inline = false;
+    engine.bot_spawn_routes.blocking = true;
+    engine.prefetch_bot_spawn_routes(Duration::ZERO, 1).unwrap();
+    engine.wait_bot_spawn_routes(1).unwrap();
+    assert_eq!(
+        spawned(choose(&mut engine, &actors).0).spawn_point,
+        Some(DROP)
+    );
+    // A cached qualification is not queued again.
+    engine
+        .prefetch_bot_spawn_routes(Duration::from_secs(1), 1)
+        .unwrap();
+    assert!(engine.bot_spawn_routes.pending.is_empty());
+    let key = SpawnRouteKey::Point(DROP, HOME);
+
+    // A gate change queues one revalidation; lives keep the drop zone
+    // meanwhile instead of falling back to their slot.
+    change_structure_gates(&mut engine, 1);
+    let probed = engine.bot_registry.spawn_candidates.probes;
+    engine
+        .prefetch_bot_spawn_routes(Duration::from_secs(2), 1)
+        .unwrap();
+    assert!(engine.bot_spawn_routes.pending.contains(&key));
+    assert_eq!(engine.bot_registry.spawn_candidates.probes, probed);
+    // The revalidation may or may not have answered yet; either way the
+    // life uses the drop zone.
+    let (choice, mut receipts) = choose(&mut engine, &actors);
+    assert_eq!(spawned(choice).spawn_point, Some(DROP));
+    engine.wait_bot_spawn_routes(1).unwrap();
+    let (choice, later) = choose(&mut engine, &actors);
+    assert_eq!(spawned(choice).spawn_point, Some(DROP));
+    receipts.extend(later);
+    assert!(
+        receipts
+            .iter()
+            .any(|r| r["op"] == "bot_spawn_point_qualified"),
+        "the revalidation is stored"
+    );
+    assert!(engine.bot_registry.stale_spawn_qualification.is_empty());
+
+    // Another change within 15 s of that revalidation routes nothing.
+    change_structure_gates(&mut engine, 2);
+    engine
+        .prefetch_bot_spawn_routes(Duration::from_secs(5), 1)
+        .unwrap();
+    assert!(
+        engine
+            .bot_registry
+            .stale_spawn_qualification
+            .contains(&(DROP, HOME)),
+        "the gates changed again"
+    );
+    assert!(engine.bot_spawn_routes.pending.is_empty());
+    let spawn = spawned(choose(&mut engine, &actors).0);
+    assert_eq!(spawn.spawn_point, Some(DROP), "{spawn:?}");
+    assert_eq!(spawn.arrival, Arrival::ParachuteLanding);
+    engine
+        .prefetch_bot_spawn_routes(Duration::from_secs(17), 1)
+        .unwrap();
+    assert!(engine.bot_spawn_routes.pending.contains(&key));
+}
+
+#[test]
+fn a_squad_on_its_authored_default_queues_no_point_routes() {
+    let mut engine = engine();
+    engine.bot_spawn_routes.inline = false;
+    engine.bot_spawn_routes.blocking = true;
+    engine.prefetch_bot_spawn_routes(Duration::ZERO, 1).unwrap();
+    assert!(
+        !engine
+            .bot_spawn_routes
+            .pending
+            .iter()
+            .any(|key| matches!(key, SpawnRouteKey::Point(..))),
+        "the population slot comes first: nothing to route"
+    );
+}

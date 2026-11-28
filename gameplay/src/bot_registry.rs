@@ -170,6 +170,11 @@ pub(crate) struct BotRegistry {
     /// Placements per (spawn point, population source spawn).
     pub(super) spawn_qualification:
         BTreeMap<(u16, u16), Result<crate::bot_spawn_selection::QualifiedPoint, &'static str>>,
+    /// Qualifications above that were routed through earlier structure
+    /// gates. They stay in use until revalidated (bot_spawn_selection).
+    pub(super) stale_spawn_qualification: BTreeSet<(u16, u16)>,
+    /// When each stale qualification's revalidation was last queued.
+    pub(super) spawn_revalidated_at: BTreeMap<(u16, u16), Duration>,
     /// Grounded placements per spawn point before routing, for the collision
     /// world they were probed in. Structure gate changes leave them alone:
     /// they depend only on static collision and authored hospital exits.
@@ -3866,6 +3871,8 @@ impl<W: Write> Engine<W> {
         self.bot_registry.regional_unavailable = None;
         self.bot_registry.firearm_cursor = 0;
         self.bot_registry.spawn_qualification.clear();
+        self.bot_registry.stale_spawn_qualification.clear();
+        self.bot_registry.spawn_revalidated_at.clear();
         self.bot_registry.lane_spawns.clear();
         self.bot_registry.spawn_route_gates = None;
         self.bot_registry.spawn_candidates = Default::default();

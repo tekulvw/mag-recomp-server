@@ -128,6 +128,14 @@ So the server never routes for a spawn choice inside the world tick:
   point); a pass that meets more stops there and continues on the next tick.
   Before this, a 256-player Domination simulation probed about 45 defender
   points in one tick (200–360 ms), and again after every gate change.
+- The same pass queues the point routes of squads without ranked goals
+  (attackers on their lane): every point their active-spawn order tries
+  before the population slot, such as an open parachute drop zone or a human
+  leader's squad spawn, under the same probe budget. Before, these were
+  queued only when a life asked at its wave. In live Domination the answer
+  was still pending then, and the next structure gate change cleared it
+  again, so attacker lives used their population slot at every wave and
+  never the open drop zones.
 - The check behind squad fill order (whether a squad's population slots
   reach any objective; see `bot_population_unroutable_squads`) runs once per
   population on its own worker thread, started at the same time. Until it
