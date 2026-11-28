@@ -414,6 +414,52 @@ mod incapacitated_tests {
         assert!(armor.with_incoming_base(100.0).is_ok());
     }
 
+    /// Armor tiers that author no flat rating and full prevention differ only
+    /// by per-area coverage; penetrating ammo lowers prevention before the
+    /// coverage product, and owned damage-taken modifiers scale first.
+    #[test]
+    fn coverage_only_armor_tiers_reduce_by_coverage_and_penetration() {
+        let tier = |coverage: f32| {
+            let mut armor = profile();
+            armor.parameters.rating = 0.0;
+            armor.parameters.prevention = 1.0;
+            armor.parameters.coverage = [coverage; 4];
+            armor.damage_taken = 0.0;
+            armor.body = std::array::from_fn(|location| BodyParameters {
+                armor_area: location % 4,
+                multiplier: if location == 9 { 2.0 } else { 1.0 },
+            });
+            armor
+        };
+        let shot = |pierce: f32, location: u8| RawCharacterDamage {
+            amount_hp: 40.0,
+            armor_rating_redux: 0.0,
+            armor_prevention_redux: pierce,
+            hit_location: location,
+        };
+        let (unarmored, light, heavy) = (tier(0.0), tier(0.25), tier(0.5));
+        assert_eq!(unarmored.adjust(shot(0.0, 0)), Ok(40.0));
+        assert_eq!(light.adjust(shot(0.0, 0)), Ok(30.0));
+        assert_eq!(heavy.adjust(shot(0.0, 0)), Ok(20.0));
+        // Prevention 1.0-0.5 halves what coverage stops.
+        assert_eq!(heavy.adjust(shot(0.5, 0)), Ok(30.0));
+        assert_eq!(unarmored.adjust(shot(0.5, 0)), Ok(40.0));
+        // Penetration beyond prevention clamps to no protection, never extra damage.
+        assert_eq!(heavy.adjust(shot(2.0, 0)), Ok(40.0));
+        // Location multipliers compose with, and do not bypass, the armor factor.
+        assert_eq!(heavy.adjust(shot(0.0, 9)), Ok(40.0));
+        // An owned damage-taken reduction applies before armor.
+        let mut resistant = heavy;
+        resistant.damage_taken = -0.25;
+        assert_eq!(resistant.adjust(shot(0.0, 0)), Ok(15.0));
+        let audit = heavy
+            .calculation(shot(0.5, 0), crate::damage::DamageKind::Bullet)
+            .unwrap();
+        assert_eq!(audit["armor_rating"], 0.0);
+        assert_eq!(audit["coverage"], 0.5);
+        assert_eq!(audit["after_armor_hp"], 30.0);
+    }
+
     #[test]
     fn incapacitated_damage_uses_all_explicit_body_rows_and_preserves_actor_armor_and_modifiers() {
         let catalog = RetailCombatCatalog::from_json(&metadata().to_string()).unwrap();
