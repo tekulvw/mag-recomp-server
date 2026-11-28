@@ -131,6 +131,9 @@ struct ServeArgs {
     #[arg(long, env = "PORTAL_PLAYER_REPORTS_PER_DAY", default_value_t = mag_portal::player_reports::DEFAULT_PER_DAY,
           value_parser = clap::value_parser!(i64).range(1..=1000))]
     player_reports_per_day: i64,
+    /// Allow name changes only after upgrading every game-ticket audience's owner lookup.
+    #[arg(long, env = "PORTAL_PLAYER_NAME_CHANGES", value_parser = clap::builder::BoolishValueParser::new())]
+    player_name_changes: bool,
     /// Skip migrations at start (run `mag-portal migrate` separately).
     #[arg(long, env = "PORTAL_SKIP_MIGRATIONS")]
     skip_migrations: bool,
@@ -157,6 +160,7 @@ async fn serve(args: ServeArgs) -> anyhow::Result<()> {
     settings.owner_emails = mag_portal::staff::parse_owner_emails(&args.owner_emails);
     settings.font_dir = args.font_dir;
     settings.player_reports_per_day = args.player_reports_per_day;
+    settings.player_name_changes = args.player_name_changes;
     settings.client_ip_header = args
         .client_ip_header
         .map(|h| h.trim().to_ascii_lowercase())

@@ -3,7 +3,7 @@
 {% block content %}
 <div class="panel narrow">
 <h1>Choose your player name</h1>
-<p>This is your name on the server. You cannot change it later.</p>
+<p>This is your public name on the server. Your characters and progress stay with your account.</p>
 {% if let Some(e) = error %}<p class="alert">{{ e }}</p>{% endif %}
 <form method="post" action="/claim" class="stack">
   <input type="hidden" name="csrf" value="{{ csrf }}">

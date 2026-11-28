@@ -432,7 +432,7 @@ async fn user_page(State(state): Shared, headers: HeaderMap, Path(id): Path<i32>
             devices,
             game_href: game::character_href(
                 state.settings.game_admin.as_ref(),
-                account.player_name.as_deref(),
+                account.game_account_name.as_deref(),
             ),
             social,
         },
@@ -552,6 +552,7 @@ async fn user_assign_name(
             "That name is not reserved. Reserve it first, or let the player claim it."
         }
         AssignOutcome::AccountNamed => "This account already has a name.",
+        AssignOutcome::Owned => "A live account owns this name. It cannot be transferred.",
         AssignOutcome::NoSuchAccount => "That account no longer exists.",
     };
     Ok(message(

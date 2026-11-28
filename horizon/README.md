@@ -129,6 +129,34 @@ verified portal game tickets; `MAG_PORTAL_TICKET_KEYS` and `MAG_PORTAL_TICKET_AU
 the verifying keys and this server's host name. It is `off` by default. See
 [docs/portal-ticket.md](../docs/portal-ticket.md#medius-verification-operators).
 
+For portal name changes, additionally set `MAG_PORTAL_ACCOUNT_LOOKUP=required` and
+`MAG_PORTAL_ACCOUNT_DB_CONNECTION_FILE` to an absolute path containing the portal database's
+Npgsql connection string. This requires ticket mode `required` and portal migration 0009.
+It is independent of Sony authentication. Unset or `off` preserves existing ticket behavior.
+Use a database role with read access to `accounts.id`, `game_account_name`, `player_name` and
+`banned_at`; the server never writes portal accounts.
+
+The account ID signed by a MAGT v1 ticket resolves to the immutable lowercase game owner.
+The signed name is display identity, including a legitimate pre-rename name until its normal
+ticket expiry. Character ownership, existing stored names, NP identities and progress remain
+unchanged. Incoming creation NP IDs must match the authenticated public name; new records
+retain the canonical owner-bound NP identity contract. Current public names travel separately
+through login credentials, MLS player cards and game admission.
+
+Database work runs on a background task: initial startup refresh, then once per second,
+maximum 100,000 rows, pool size two and three-second connection/command deadlines. Readers
+use a complete snapshot without I/O. Unknown IDs, snapshots five seconds old, and failed
+refreshes deny new sign-ins until recovery. Bans/deletion/unnamed accounts disappear on
+refresh; service accounts remain eligible. Startup fails with a sanitized error if migration
+0009 or the secret file is missing. Coordinate all configured ticket-audience servers before
+enabling `PORTAL_PLAYER_NAME_CHANGES=1`; restart MAG after a rename to apply the display name.
+No deployment or release is implied by this configuration.
+
+The optional real-schema synthetic check accepts `MAG_TEST_POSTGRES` with create-database
+rights and `MAG_TEST_PORTAL_MIGRATIONS` pointing at the checked-out `portal/migrations`.
+Set `MAG_REQUIRE_PORTAL_ACCOUNT_CHECKS=1` to require that check; it creates and removes its
+own database and uses the actual migrations to verify backfill and immutable ownership.
+
 ## Internal admin API
 
 `MAG_ADMIN_API_LISTEN` with `MAG_ADMIN_API_SECRET_FILE` starts an authenticated, cluster-internal

@@ -230,6 +230,13 @@ namespace RT.Models.MAG
     // counters not initialized there are explicitly zero for this local development profile.
     public sealed class MagCharacterRecord
     {
+        // Copy scalar fields and existing read-only payload arrays; replace only outbound NP identity.
+        public MagCharacterRecord WithNpId(byte[] npId)
+        {
+            var copy = (MagCharacterRecord)MemberwiseClone();
+            copy.NpId = npId;
+            return copy;
+        }
         public string Name { get; set; } = string.Empty;
         public uint AccountId { get; set; }
         public byte Faction { get; set; } = 255;

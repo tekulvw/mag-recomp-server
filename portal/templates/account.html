@@ -12,6 +12,7 @@
   <dt>Signed in with</dt>
   <dd>Google{% if let Some(email) = email %} ({{ email }}){% endif %}</dd>
 </dl>
+{% if name_changes && !banned && player_name.is_some() %}<p><a href="/account/name">Change your player name</a>. Restart MAG after changing it. Your characters and progress stay with your account.</p>{% endif %}
 
 <p><a href="/friends">Friends</a>: add players, answer requests and block players.</p>
 <p><a href="/reports/new">Report a player</a> for cheating, harassment, griefing or an offensive name. <a href="/reports">Your reports</a> show whether a moderator has reviewed them.</p>

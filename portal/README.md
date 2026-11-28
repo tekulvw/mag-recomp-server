@@ -205,7 +205,7 @@ Run `mag-portal admin <command>` with `DATABASE_URL` set (in Kubernetes, `kubect
 | `ban <name> --reason <text>` / `unban <name>` | Stop or restore ticket issuing. Tickets already issued last until they expire. |
 | `reserve <name>… [--reason <text>]` | Names nobody may claim, such as names that already have characters on the server. |
 | `assign <name> --account-id <id>` | Give a reserved name to an account without a name. |
-| `release <name>` | Let anyone claim a reserved name. |
+| `release <name>` | Let anyone claim a manual reservation. Live, historical and deleted-owner names require explicit recovery and cannot be released. |
 | `reserved` | List reserved names. |
 | `service-account create <name>` | Create a service account for a free or reserved name. |
 | `service-account mint-token <name> --label <text>` | Mint a launcher token. Only the token goes to stdout, once; store it. |
@@ -231,3 +231,53 @@ only its hash is kept), revoke tokens and delete the account (its name stays res
 accounts get tickets through the same API as everyone else, and bans apply to them. Moderators can
 see them, with their tokens' labels and use, but cannot change them, ban them or revoke their
 tokens: they are operator infrastructure, so changing them needs an admin.
+
+## Public player-name changes
+
+Name changes are **off by default**. `PORTAL_PLAYER_NAME_CHANGES=1` (or
+`serve --player-name-changes`) enables the authenticated, CSRF-protected form at
+`/account/name`, linked from the account page. A person may change their name once every
+24 hours, including capitalization changes. Submitting the identical spelling is a no-op
+and does not restart the cooldown. Existing name syntax and case-insensitive uniqueness
+apply. Former names stay reserved to their owner and that same owner may reclaim them
+after the cooldown. Banned and service accounts cannot use the rename form.
+
+Migration `0009_player_names.sql` backfills immutable lowercase
+`accounts.game_account_name` from every existing named person's or service's public name.
+First claims initialize it once; a database trigger prevents changing or clearing it.
+`accounts.name_changed_at` records actual public-name changes. Devices, numeric account
+IDs, Google identities, social relations, character names and progression do not change.
+MAGT v1 tickets and ticket JSON continue carrying the current public `player_name`.
+
+**Enable only after upgrading every server and replica for every configured ticket
+audience.** Each must use `MAG_PORTAL_ACCOUNT_LOOKUP=required` with
+`MAG_PORTAL_ACCOUNT_DB_CONNECTION_FILE` naming its portal database connection secret.
+The game server resolves the signed numeric account ID to immutable game owner; it must
+not derive character ownership from the new public name. An old server accepts a renamed
+v1 ticket but interprets its public name as a different owner. The portal feature flag is
+an operator-controlled rollout gate, not automatic compatibility with old servers.
+This lookup is independent of Sony authentication and does not require PR 435 or its
+external-identity schema. Confirm every audience is upgraded before enabling the portal
+flag; do not enable during a mixed-server rollout.
+
+Players should restart MAG after a rename so the signed public identity and game display
+update together. Tickets already issued keep their normal expiry and numeric account ID;
+the new lookup still selects the same owner. A running game may show its previous public
+name until restart. Reports preserve the name recorded at filing, while report grouping,
+moderation and game-admin links use immutable owner keys.
+
+Reservations carry nullable `owner_account_id`, canonical `game_account_name` and
+`recovery_only`. Live names and name history cannot be transferred through release,
+assignment or service creation. Deletion detaches reservations without freeing them for
+ordinary claims. Legacy reservations are conservatively marked recovery-only because
+their free-text reason does not distinguish imports from deleted owners. An administrator
+may explicitly assign a detached reservation to an unnamed account, or create a service
+account from it, preserving its canonical owner and reattaching its other historical
+reservations. This intentionally recovers that owner's existing characters: verify the
+recipient independently before doing it. Ordinary manual reservations created after this
+migration can still be released.
+
+After the first rename, rolling back to a server that derives ownership from public names
+is unsafe. Disable further renames first and retain the owner columns, history and upgraded
+lookup. Do not drop the migration or silently issue tickets using a previous name as a
+rollback workaround. Deployment and releases remain manual.

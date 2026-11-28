@@ -130,11 +130,11 @@ internal static partial class LeadershipProgressionChecks
         typeof(LocalDmeHost).GetField("_worldStreamHealthy", HostInternals)!.SetValue(host, true);
     }
 
-    private static MagMlsSession MakeSession(LocalCharacterStore store, int applicationId, string account, uint characterId)
+    private static MagMlsSession MakeSession(LocalCharacterStore store, int applicationId, string account, uint characterId, string publicName = null)
     {
         var now = DateTime.UtcNow;
         var registry = new MagLoginRegistry();
-        var ticket = registry.IssueForAccount(account, characterId, 1, now);
+        var ticket = registry.IssueForAccount(account, characterId, 1, now, publicName);
         var session = new MagMlsSession { CharacterStore = store };
         var connect = new RT_MSG_CLIENT_CONNECT_TCP {
             AppId = applicationId, TargetWorldId = 1, AccessToken = ticket.AccessToken, SessionKey = ticket.SessionKey
@@ -230,4 +230,23 @@ internal static partial class LeadershipProgressionChecks
                 "Reconnect reserve carried stale XP or leadership points across an in-flight settlement");
         }).GetAwaiter().GetResult();
     });
+    public static void RenamedAdmission() => WithDirectory(directory =>
+    {
+        foreach (int app in new[] { 20230, 20231 })
+        {
+            var store = new LocalCharacterStore(Path.Combine(directory, app + ".json"));
+            Create(store, "alpha", "OldPublic");
+            WithAdmission(store, async (host, bridge, originalSession) =>
+            {
+                var session = MakeSession(store, app, "alpha", 1, "NewPublic");
+                Check((await BeginJoin(host, session).WaitAsync(AdmissionTimeout)).Result == 0, "Renamed admission rejected");
+                var reserved = bridge.Latest("reserve");
+                Check(reserved["character"]!["name"]!.GetValue<string>() == "NewPublic", "Admission lost authenticated public name");
+                Check(reserved["character"]!["loadout_account_id"]!.GetValue<string>() == "alpha", "Admission transferred owner to public name");
+                Check(store.ReadForAccount("alpha").Single().Name == "OldPublic" && store.ReadForAccount("newpublic").Count == 0,
+                    "Admission rewrote stored character identity");
+            }, app).GetAwaiter().GetResult();
+        }
+    });
+
 }

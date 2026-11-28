@@ -192,6 +192,12 @@ portalTickets:
   # Key ID (0-255) to base64 DER SubjectPublicKeyInfo, as served by the portal's
   # GET /api/v1/ticket-keys. Public keys, not secrets. Keep the old key while rotating.
   keys: {}
+  # Optional immutable account-ID to character-owner mapping for player-name changes.
+  # Enable this on EVERY portal ticket audience before enabling portal name changes.
+  accountLookup:
+    mode: "off"
+    existingSecret: ""
+    secretKey: connectionString
 # Optional internal admin API for character maintenance (docs/admin-cli.md, "Admin API"),
 # served by the main medius container only. It is cluster-internal: a ClusterIP Service and a
 # NetworkPolicy admit only pods in allowedNamespaceSelector namespaces. Never route it through a

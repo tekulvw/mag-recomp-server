@@ -572,4 +572,114 @@ internal static class PortalTicketChecks
         }
         finally { Server.Medius.Program.Settings.MagApplicationId = previousApp; }
     }
+    public static void RenamedSessions()
+    {
+        using var key = ECDsa.Create(ECCurve.NamedCurves.nistP256);
+        const long now = 1_900_000_000;
+        var clock = At(now);
+        var settings = Settings("game.example.test", (1, key.ExportSubjectPublicKeyInfo()));
+        IReadOnlyDictionary<uint, string> rows = new Dictionary<uint, string> { [17] = "oldpublic", [18] = "otherowner", [19] = "service_owner" };
+        using var cache = new MagPortalAccountCache(_ => Task.FromResult(rows), () => clock);
+        cache.RefreshAsync().GetAwaiter().GetResult();
+        byte seed = 0;
+        byte[] Ticket(uint id, string name) => Sign(key, Unsigned(1, now - 5, now + 600, id, Nonce(++seed), "game.example.test", name));
+        var policy = new MagPortalTicketPolicy(settings, () => clock, accounts: cache);
+        MagPortalAuthentication Use(uint id, string name, Owner owner = null)
+        {
+            byte[] bytes = Ticket(id, name);
+            return policy.Authenticate(new MagPortalTicketAssembly(), Chunk(bytes, bytes.Length, true), owner, clock);
+        }
+        Check(Use(17, "OldPublic").Account == "oldpublic" && Use(17, "NewPublic").Account == "oldpublic", "Old/new signed names changed immutable owner");
+        Check(Use(18, "NewPublic").Account == "otherowner", "Same public name moved another ID to first owner's characters");
+        Check(Use(88, "NewPublic").Reason == MagPortalTicketReason.AccountUnavailable, "Name-based fallback accepted unknown numeric ID");
+        Check(Use(19, "ServicePublic").Account == "service_owner", "Service ticket refused");
+        var held = new Owner();
+        Check(Use(17, "OldPublic", held).Accepted && Use(17, "NewPublic", new Owner()).Reason == MagPortalTicketReason.AccountSignedIn,
+            "Renamed ticket bypassed stable live-session binding");
+        held.Live = false;
+        int previousApp = Server.Medius.Program.Settings.MagApplicationId;
+        string directory = Path.Combine(Path.GetTempPath(), "mag-renamed-wire-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(directory);
+        try
+        {
+            foreach (int app in new[] { 20230, 20231 })
+            {
+                Server.Medius.Program.Settings.MagApplicationId = app;
+                var store = new LocalCharacterStore(Path.Combine(directory, app + ".json"));
+                var oldNp = new byte[36]; Encoding.ASCII.GetBytes("OldPublic").CopyTo(oldNp, 0);
+                Check(store.CreateForAccount(new MagCreateCharacterRequest { AccountName = "OldPublic!0", Faction = 1, HeadId = 2, VoiceId = 3, UniverseId = 26, NpId = oldNp }, "oldpublic", "OldPublic").Result == MagNetResult.Success, "Old character setup");
+                var registry = new MagLoginRegistry();
+                var mas = new MagMasSession { PortalTickets = policy, CharacterStore = store, CharacterStorageEnabled = true, AccountLoginEnabled = true, CharacterDataEnabled = true, LoginRegistry = registry };
+                Wire(e => mas.HandleMany(true, app, e, clock), new MagHello(), app);
+                Wire(e => mas.HandleMany(true, app, e, clock), new MagProtocolInfo { ProtocolVersion = Server.Medius.Program.Settings.MagProtocolVersion }, app);
+                var bytes = Ticket(17, "NewPublic");
+                Check(Succeeded(Wire(e => mas.HandleMany(true, app, e, clock), Chunk(bytes, bytes.Length, true, app == 20231), app), app) && mas.AuthenticatedAccount == "oldpublic" && mas.AuthenticatedPublicName == "NewPublic", "MAS signed rename identity");
+                var newNp = new byte[36]; Encoding.ASCII.GetBytes("NewPublic").CopyTo(newNp, 0);
+                Wire(e => mas.HandleMany(true, app, e, clock), new MagCreateCharacterRequest { AccountName = "NewPublic!1", Faction = 1, HeadId = 2, VoiceId = 3, UniverseId = 26, NpId = newNp }, app);
+                Check(mas.StorageStatus == "local-profile-committed" && store.ReadForAccount("oldpublic").Count == 2 && store.ReadForAccount("newpublic").Count == 0, "MAS creation used public name as owner");
+                var replies = Wire(e => mas.HandleMany(true, app, e, clock), app == 20231
+                    ? new MagRetailAccountLoginRequest { AccountName = "OldPublic!0", VersionMajor = 3, VersionMinor = 3, VersionBuild = 1, DnasSignature = "" }
+                    : new MagAccountLoginRequest { AccountName = "OldPublic!0", VersionMajor = 3, VersionMinor = 3, VersionBuild = 1, DnasSignature = "" }, app);
+                Check(replies.Count == 1 && MagMessageCodec.TryParseForApplication(replies[0].Payload, app, out var parsed) && parsed is MagAccountLoginResponse,
+                    "MAS did not issue selected character credentials");
+                MagMessageCodec.TryParseForApplication(replies[0].Payload, app, out var message);
+                var login = (MagAccountLoginResponse)message;
+                Check(login.Result == 1, "Existing stored character login denied after rename");
+                var selectedReplies = Wire(e => mas.HandleMany(true, app, e, clock), new MagCharacterDataRequest { QueryKind = 2, AccountId = login.AccountId }, app);
+                Check(selectedReplies.Count == 1 && MagMessageCodec.TryParseForApplication(selectedReplies[0].Payload, app, out var selectedMessage) &&
+                    selectedMessage is MagCharacterDataResponse selected && selected.Success &&
+                    StoredCharacter.DisplayNameFor(selected.Record.Name, selected.Record.NpId) == "NewPublic" && selected.Record.Name == "OldPublic!0",
+                    "MAS selected character record lost signed public NP identity for profile " + app);
+                string Ascii(byte[] field) => Encoding.ASCII.GetString(field).TrimEnd('\0');
+                var mls = new MagMlsSession { CharacterStore = store };
+                Check(mls.TryBind(new RT_MSG_CLIENT_CONNECT_TCP { AppId = app, TargetWorldId = 1, AccessToken = Ascii(login.AccessKey), SessionKey = Ascii(login.SessionKey) }, registry, "renamed-" + app, clock) &&
+                    mls.AuthenticatedAccount == "oldpublic" && mls.AuthenticatedPublicName == "NewPublic", "Credentials lost public/owner separation");
+                Check(mls.Accept(clock) && mls.CompleteTransport(clock), "MLS transport setup");
+                Wire(e => mls.HandleMany(e, clock), new MagHello(), app);
+                Wire(e => mls.HandleMany(e, clock), new MagProtocolInfo { ProtocolVersion = Server.Medius.Program.Settings.MagProtocolVersion }, app);
+                replies = Wire(e => mls.HandleMany(e, clock), new MagCharacterDataRequest { QueryKind = 1, AccountName = "NewPublic" }, app);
+                Check(replies.Count == 1 && MagMessageCodec.TryParseForApplication(replies[0].Payload, app, out parsed) && parsed is MagCharacterDataResponse card && card.Success &&
+                    StoredCharacter.DisplayNameFor(card.Record.Name, card.Record.NpId) == "NewPublic" && card.Record.AccountId == login.AccountId, "MLS card missed authenticated public name");
+                var commonRecord = store.ReadForAccount("oldpublic").Single(c => c.Name == "OldPublic!0").ToRecord();
+                var canonicalNp = commonRecord.NpId.ToArray();
+                commonRecord.Experience = 123; commonRecord.SkillPoints = 7;
+                var fullRecords = new List<MagMessage> {
+                    new MagCharacterDataResponse { Success = true, Record = commonRecord },
+                    new MagPurchaseSkillResponse { Success = true, Record = commonRecord },
+                    new MagCharacterRecordNotification { Record = commonRecord }
+                };
+                if (app == 20231) fullRecords.Add(new MagRetailSkillRespecResponse { Success = true, Record = commonRecord });
+                foreach (var fullRecord in fullRecords)
+                {
+                    var envelope = mls.ToClient(fullRecord);
+                    Check(MagMessageCodec.TryParseForApplication(envelope.Payload, app, out var decoded), "Full-record reply did not parse");
+                    var shown = decoded switch {
+                        MagCharacterDataResponse data => data.Record, MagPurchaseSkillResponse skill => skill.Record,
+                        MagCharacterRecordNotification notification => notification.Record, MagRetailSkillRespecResponse respec => respec.Record,
+                        _ => null
+                    };
+                    Check(shown != null && StoredCharacter.DisplayNameFor(shown.Name, shown.NpId) == "NewPublic" &&
+                        shown.Experience == 123 && shown.SkillPoints == 7 && commonRecord.NpId.SequenceEqual(canonicalNp),
+                        "Common outbound full-record identity boundary lost public name, progress or source isolation: " + fullRecord.MessageType);
+                }
+                var old = store.ReadForAccount("oldpublic").Single(c => c.Name == "OldPublic!0");
+                Check(old.NpId.SequenceEqual(oldNp) && old.Name == "OldPublic!0", "Display response rewrote historical character identity");
+                mas.EndPortalSession();
+                var maps = new MagMapsSession { PortalTickets = new MagPortalTicketPolicy(settings, () => clock, accounts: cache) };
+                Wire(e => maps.HandleMany(true, app, e, clock), new MagHello(), app);
+                if (app != 20231) Wire(e => maps.HandleMany(true, app, e, clock), new MagUniverseListRequest(), app);
+                bytes = Ticket(17, "NewPublic");
+                Check(Succeeded(Wire(e => maps.HandleMany(true, app, e, clock), Chunk(bytes, bytes.Length, true, app == 20231), app), app) &&
+                    maps.AuthenticatedAccount == "oldpublic" && maps.AuthenticatedPublicName == "NewPublic", "MAPS identity separation");
+                maps.EndPortalSession();
+            }
+        }
+        finally { Directory.Delete(directory, true); Server.Medius.Program.Settings.MagApplicationId = previousApp; }
+        rows = new Dictionary<uint, string> { [19] = "service_owner" };
+        cache.RefreshAsync().GetAwaiter().GetResult();
+        Check(Use(17, "OldPublic").Reason == MagPortalTicketReason.AccountUnavailable, "Banned/deleted identity still admitted after refresh");
+        clock = clock.AddSeconds(5);
+        Check(Use(19, "ServicePublic").Reason == MagPortalTicketReason.AccountUnavailable, "Stale lookup admitted signed ticket");
+    }
+
 }

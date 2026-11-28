@@ -482,15 +482,25 @@ namespace Server.Medius
             ? CreateForAccount(request, "player") : Outcome(MagNetResult.NameInvalid, "invalid-legacy-name");
         // A concurrent create in PostgreSQL can lose a unique-index race; the retry then sees the winner.
         public CharacterCreationOutcome CreateForAccount(MagCreateCharacterRequest request, string account) =>
-            Retrying(() => CreateForAccountOnce(request, account));
-        private CharacterCreationOutcome CreateForAccountOnce(MagCreateCharacterRequest request, string account)
+            CreateForAccount(request, account, account);
+        public CharacterCreationOutcome CreateForAccount(MagCreateCharacterRequest request, string account, string authenticatedPublicName) =>
+            Retrying(() => CreateForAccountOnce(request, account, authenticatedPublicName));
+        private CharacterCreationOutcome CreateForAccountOnce(MagCreateCharacterRequest request, string account, string authenticatedPublicName)
         {
             if (request == null || !MagDevelopmentAccountPolicy.HasZeroRsa(request) || !ValidName(request.AccountName) || !MagDevelopmentAccountPolicy.ValidAccount(account))
                 return Outcome(MagNetResult.NameInvalid, "invalid-local-name-or-header");
             if (request.Faction > 2 || request.UniverseId != 26)
                 return Outcome(MagNetResult.Error, "unsupported-local-profile-fields");
-            if (!MagDevelopmentAccountPolicy.ValidNpId(request.NpId, account))
+            if (!MagPublicIdentity.ValidName(authenticatedPublicName) || !MagDevelopmentAccountPolicy.ValidNpId(request.NpId, authenticatedPublicName.ToLowerInvariant()))
                 return Outcome(MagNetResult.Error, "np-id-account-mismatch");
+            // New records retain the canonical persisted NP/owner contract. The incoming online
+            // ID was checked against the signed public identity above; display uses credentials.
+            byte[] persistedNpId = (byte[])request.NpId.Clone();
+            if (!MagDevelopmentAccountPolicy.ValidNpId(persistedNpId, account))
+            {
+                persistedNpId = new byte[36];
+                System.Text.Encoding.ASCII.GetBytes(account).CopyTo(persistedNpId, 0);
+            }
             using var session = _backend.Open(new StoreScope(account, Name: request.AccountName));
             var all = session.Document.Characters;
             // Names are unique across the whole store. A deleted character's name was moved aside, so the
@@ -501,7 +511,7 @@ namespace Server.Medius
                 // Only an exact retry of this account's own creation succeeds again (a lost acknowledgement).
                 bool same = existing.Account == account && !existing.Deleted && existing.Name == request.AccountName &&
                     existing.Faction == request.Faction && existing.HeadId == request.HeadId && existing.VoiceId == request.VoiceId &&
-                    existing.UniverseId == request.UniverseId && existing.NpId.SequenceEqual(request.NpId);
+                    existing.UniverseId == request.UniverseId && existing.NpId.SequenceEqual(persistedNpId);
                 if (!same) return Outcome(MagNetResult.NameTaken, "character-name-taken");
             }
             else
@@ -514,7 +524,7 @@ namespace Server.Medius
                 if (session.CharacterLimit is int limit && all.Count >= limit) return Outcome(MagNetResult.Error, "local-store-full");
                 uint next = session.NextCharacterId();
                 var created = new StoredCharacter { Account = account, Id = next, Slot = slot, Name = request.AccountName, Faction = request.Faction,
-                    HeadId = request.HeadId, VoiceId = request.VoiceId, UniverseId = request.UniverseId, NpId = (byte[])request.NpId.Clone() };
+                    HeadId = request.HeadId, VoiceId = request.VoiceId, UniverseId = request.UniverseId, NpId = persistedNpId };
                 if (ProgressionCatalog != null)
                 {
                     var catalog = ProgressionCatalog;

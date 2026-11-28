@@ -192,6 +192,15 @@ Test("retail MLS replies carry a non-zero plugin id the client echoes", Leadersh
 Test("retail MLS answers the clan list, invitations and lobby-entry clan requests", LeadershipProgressionChecks.RetailClanList);
 Test("linked characters display their online ID, not the stored login key", LeadershipProgressionChecks.PlayerCardDisplayName);
 Test("gameplay admission carries the display name", LeadershipProgressionChecks.PlayerCardAdmissionName);
+Test("portal renamed sessions and credentials", PortalTicketChecks.RenamedSessions);
+Test("portal renamed gameplay admission", LeadershipProgressionChecks.RenamedAdmission);
+Test("portal owner PostgreSQL schema contract", PortalAccountPostgresChecks.Run);
+Test("portal public-name request snapshot", PortalAccountLookupChecks.PublicNameSnapshot);
+Test("portal public cards for other active owners", PortalAccountLookupChecks.PublicCards);
+Test("portal owner cache atomic refresh", PortalAccountLookupChecks.AtomicRefresh);
+Test("portal stable owner mapping", PortalAccountLookupChecks.Cache);
+Test("portal owner lookup configuration", PortalAccountLookupChecks.Configuration);
+Test("portal public name character creation", PortalAccountLookupChecks.PublicNameCreation);
 Test("portal ticket vectors from the portal", PortalTicketChecks.Vectors);
 Test("portal ticket layout, key, time and identity rules", PortalTicketChecks.Rules);
 Test("portal ticket chunk reassembly", PortalTicketChecks.Reassembly);

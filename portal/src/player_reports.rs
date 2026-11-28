@@ -158,11 +158,14 @@ pub enum Resolved {
 }
 
 /// The portal account or reserved name with this key: `(spelling, account)`.
-async fn portal_name(pool: &PgPool, key: &str) -> sqlx::Result<Option<(String, Option<i32>)>> {
+async fn portal_name(
+    pool: &PgPool,
+    key: &str,
+) -> sqlx::Result<Option<(String, String, Option<i32>)>> {
     sqlx::query_as(
-        "SELECT player_name, id FROM accounts WHERE lower(player_name) = $1
+        "SELECT game_account_name, player_name, id FROM accounts WHERE lower(player_name) = $1 OR game_account_name=$1
          UNION ALL
-         SELECT name, NULL FROM reserved_names WHERE name_key = $1
+         SELECT coalesce(game_account_name,name_key), name, owner_account_id FROM reserved_names WHERE name_key = $1
          LIMIT 1",
     )
     .bind(key)
@@ -176,7 +179,7 @@ pub async fn resolve(pool: &PgPool, game: Option<&GameAdmin>, raw: &str) -> sqlx
     let Some(key) = target_key(raw) else {
         return Ok(Resolved::Unknown);
     };
-    if let Some((name, account)) = portal_name(pool, &key).await? {
+    if let Some((key, name, account)) = portal_name(pool, &key).await? {
         return Ok(Resolved::Found(Target { key, name, account }));
     }
     let Some(game) = game else {
@@ -212,10 +215,10 @@ pub async fn suggest(
     let fetch = i64::try_from(MAX_SUGGESTIONS * 3).unwrap_or(30);
     let portal: Vec<(String, String)> = sqlx::query_as(
         "SELECT name_key, spelling FROM (
-             SELECT lower(player_name) AS name_key, player_name AS spelling FROM accounts
+             SELECT game_account_name AS name_key, player_name AS spelling FROM accounts
              WHERE player_name IS NOT NULL AND lower(player_name) LIKE $1
              UNION
-             SELECT name_key, name FROM reserved_names WHERE name_key LIKE $1
+             SELECT coalesce(game_account_name,name_key), name FROM reserved_names WHERE name_key LIKE $1 AND owner_account_id IS NULL
          ) found
          ORDER BY name_key LIKE $2 DESC, name_key LIMIT $3",
     )
@@ -225,25 +228,26 @@ pub async fn suggest(
     .fetch_all(pool)
     .await?;
     // Sorted by (not a prefix match, key), so prefix matches come first.
-    let mut found: BTreeMap<(bool, String), String> = BTreeMap::new();
+    let mut found: BTreeMap<String, String> = BTreeMap::new();
     for (key, name) in portal {
-        found.entry((!key.starts_with(&q), key)).or_insert(name);
+        found.entry(key).or_insert(name);
     }
     if let Some(game) = game
         && let Ok(keys) = game.character_keys().await
     {
         let mut extra: Vec<String> = keys
             .iter()
-            .filter(|k| k.contains(&q) && !found.contains_key(&(!k.starts_with(&q), (*k).clone())))
+            .filter(|k| k.contains(&q) && !found.contains_key(*k))
             .cloned()
             .collect();
         extra.sort_by_key(|k| (!k.starts_with(&q), k.clone()));
         extra.truncate(MAX_SUGGESTIONS * 3);
         // Spell them as their portal account or reserved name does, when one exists.
         let spelled: HashMap<String, String> = sqlx::query_as(
-            "SELECT lower(player_name), player_name FROM accounts WHERE lower(player_name) = ANY($1)
+            "SELECT game_account_name, player_name FROM accounts WHERE game_account_name = ANY($1)
              UNION
-             SELECT name_key, name FROM reserved_names WHERE name_key = ANY($1)",
+             SELECT coalesce(game_account_name,name_key), name FROM reserved_names
+             WHERE coalesce(game_account_name,name_key) = ANY($1) AND owner_account_id IS NULL",
         )
         .bind(&extra)
         .fetch_all(pool)
@@ -252,15 +256,22 @@ pub async fn suggest(
         .collect();
         for key in extra {
             let name = spelled.get(&key).cloned().unwrap_or_else(|| key.clone());
-            found.entry((!key.starts_with(&q), key)).or_insert(name);
+            found.entry(key).or_insert(name);
         }
     }
-    Ok(found
+    let mut found: Vec<String> = found
         .into_iter()
-        .filter(|((_, key), _)| Some(key.as_str()) != exclude)
+        .filter(|(key, _)| Some(key.as_str()) != exclude)
         .map(|(_, name)| name)
-        .take(MAX_SUGGESTIONS)
-        .collect())
+        .collect();
+    found.sort_by_key(|name| {
+        (
+            !name.to_ascii_lowercase().starts_with(&q),
+            name.to_ascii_lowercase(),
+        )
+    });
+    found.truncate(MAX_SUGGESTIONS);
+    Ok(found)
 }
 
 // ---- Filing ----

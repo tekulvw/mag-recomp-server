@@ -190,7 +190,8 @@ async fn review_block(
     actor: &Staff,
     target_key: &str,
 ) -> anyhow::Result<(Option<i32>, Option<&'static str>)> {
-    let Some(account) = crate::db::account_by_name(&state.pool, target_key).await? else {
+    let Some(account) = crate::db::account_by_game_account_name(&state.pool, target_key).await?
+    else {
         return Ok((None, None));
     };
     let role = staff::role_for_email(

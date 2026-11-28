@@ -261,7 +261,7 @@ async fn list(State(state): Shared, headers: HeaderMap) -> PageResult {
         .map(|c| c.account.to_ascii_lowercase())
         .collect();
     keys.dedup();
-    let ids: HashMap<String, i32> = db::account_ids_by_name_keys(&state.pool, &keys)
+    let ids: HashMap<String, i32> = db::account_ids_by_game_account_names(&state.pool, &keys)
         .await?
         .into_iter()
         .collect();
@@ -382,7 +382,7 @@ async fn character_page(
         role,
         is_admin,
     } = actor.nav();
-    let portal_id = db::account_by_name(&state.pool, &account)
+    let portal_id = db::account_by_game_account_name(&state.pool, &account)
         .await?
         .map(|a| a.id);
     let mut view = CharacterPage {

@@ -180,6 +180,14 @@ A worker restart outside Helm (a crash, OOM kill, eviction or node drain) is ado
 
 `portalTickets.mode: required` makes MAPS and MAS accept only portal game tickets instead of the development player name. Set `portalTickets.audience` to the host name players connect to and `portalTickets.keys` to key ID to base64 SubjectPublicKeyInfo entries from the portal's `GET /api/v1/ticket-keys`; they are public keys. The chart then sets `MAG_PORTAL_TICKETS`, `MAG_PORTAL_TICKET_AUDIENCE` and `MAG_PORTAL_TICKET_KEYS` in both Medius containers, and refuses to render `required` without an audience and a key. The default `"off"` (quote it; bare `off` is a YAML boolean) sets nothing. See [docs/portal-ticket.md](../../docs/portal-ticket.md#medius-verification-operators) for rollout and rotation.
 
+For optional portal player-name changes, set `portalTickets.accountLookup.mode: required`,
+`existingSecret` to a portal-database connection-string Secret and `secretKey` to its key
+(default `connectionString`). This requires portal ticket mode `required`, configures both
+Medius roles and mounts the Secret read-only. Gameplay workers receive neither setting nor
+mount. Upgrade and enable lookup on every ticket audience before enabling the portal's
+`PORTAL_PLAYER_NAME_CHANGES=1` feature gate. See [player-name changes](../../docs/player-name-changes.md)
+for the migration, immutable ownership, 24-hour cooldown and complete rollout order.
+
 ```yaml
 portalTickets:
   mode: required
