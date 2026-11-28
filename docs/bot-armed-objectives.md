@@ -24,7 +24,7 @@ attempted by bots.
 | Team | Duty | Goal |
 | --- | --- | --- |
 | Defenders | `armed_converge` | ring 3–7 m around the objective |
-| Attackers | `armed_guard` | ring 8–14 m around the objective |
+| Attackers | `armed_guard` | ring 8–14 m around the objective; a Domination point's ring, 2.5–7 m by default ([bot-assault.md](bot-assault.md#points)) |
 
 A bot already standing inside its duty's outer radius keeps its spot instead
 of walking to a ring place, so it can keep firing. While a defender holds a

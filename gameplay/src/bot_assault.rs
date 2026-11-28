@@ -21,8 +21,9 @@
 //! - **Waves.** A squad whose bots are all far from its open point gathers at
 //!   a rally place `rally_back_m` before it (towards the squad's home spawn)
 //!   until `rally_share` of its living bots are there or `rally_wait_ms` has
-//!   passed, then pushes in together. It gathers again only once it has no
-//!   living bot within `rally_back_m` of the point.
+//!   passed, then pushes in together. A push lasts at least `rally_wait_ms`;
+//!   the squad gathers again only once it has no living bot within
+//!   `rally_back_m + rally_radius_m` of the point.
 //!
 //! Each bot tick is O(groups x squads) for the stages and O(squads x bots)
 //! for the rallies.
@@ -194,8 +195,8 @@ fn flat(a: [f64; 3], b: [f64; 3]) -> f64 {
 pub(crate) enum Wave {
     /// Gathering at the rally place since then.
     Rally { point: u16, since: Duration },
-    /// Pushing into the point.
-    Push { point: u16 },
+    /// Pushing into the point since then.
+    Push { point: u16, since: Duration },
 }
 
 /// What a squad's living bots look like for its wave this tick.
@@ -238,7 +239,7 @@ pub(crate) fn advance_waves(
         let alive = bots.get(&s.squad).map_or(&[][..], Vec::as_slice);
         if alive.is_empty()
             && waves.get(&s.squad).is_some_and(|w| match *w {
-                Wave::Rally { point: p, .. } | Wave::Push { point: p } => p == point,
+                Wave::Rally { point: p, .. } | Wave::Push { point: p, .. } => p == point,
             })
         {
             // Nobody to move: the squad keeps its wave until its next life.
@@ -247,6 +248,13 @@ pub(crate) fn advance_waves(
         let forward = alive
             .iter()
             .any(|&p| flat(p, s.center) < policy.rally_back_m);
+        // A push keeps going while a bot is anywhere up to the far side of
+        // the rally place, so a squad leaving its rally place does not
+        // flip straight back to gathering.
+        let engaged = alive
+            .iter()
+            .any(|&p| flat(p, s.center) <= policy.rally_back_m + policy.rally_radius_m);
+        let wait = Duration::from_millis(policy.rally_wait_ms);
         let gathered = alive
             .iter()
             .filter(|&&p| {
@@ -256,18 +264,22 @@ pub(crate) fn advance_waves(
         let ready = !alive.is_empty() && gathered as f64 >= policy.rally_share * alive.len() as f64;
         let next = match waves.get(&s.squad).copied() {
             Some(Wave::Rally { point: p, since }) if p == point => {
-                let waited =
-                    now.saturating_sub(since) >= Duration::from_millis(policy.rally_wait_ms);
-                if ready || waited {
-                    Wave::Push { point }
+                if ready || now.saturating_sub(since) >= wait {
+                    Wave::Push { point, since: now }
                 } else {
                     Wave::Rally { point, since }
                 }
             }
-            // A squad with a bot forward pushes (or keeps pushing); one that
-            // has none there, on a new point or after losing its push,
+            // A push lasts at least the rally wait, then while a bot is
+            // engaged. A squad with a bot forward pushes at once; one with
+            // none there, on a new point or after its push is spent,
             // gathers first.
-            _ if forward => Wave::Push { point },
+            Some(Wave::Push { point: p, since })
+                if p == point && (engaged || now.saturating_sub(since) < wait) =>
+            {
+                Wave::Push { point, since }
+            }
+            _ if forward => Wave::Push { point, since: now },
             _ => Wave::Rally { point, since: now },
         };
         if waves.get(&s.squad) != Some(&next) {
@@ -421,7 +433,7 @@ impl<W: Write> Engine<W> {
         for (squad, wave) in changes {
             let (state, point) = match wave {
                 Some(Wave::Rally { point, .. }) => ("rally", Some(point)),
-                Some(Wave::Push { point }) => ("push", Some(point)),
+                Some(Wave::Push { point, .. }) => ("push", Some(point)),
                 None => ("none", None),
             };
             receipts.push(

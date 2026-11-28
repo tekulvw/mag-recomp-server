@@ -202,21 +202,31 @@ fn a_squad_far_from_its_point_gathers_then_pushes_together() {
     )]);
     assert_eq!(
         advance_waves(&mut waves, &[input(1, Some(7))], &bots, &policy, at(6000)),
-        vec![(1, Some(Wave::Push { point: 7 }))]
+        vec![(
+            1,
+            Some(Wave::Push {
+                point: 7,
+                since: at(6000)
+            })
+        )]
     );
+    // Leaving the rally place, still behind the rally distance: no flip back.
+    assert!(advance_waves(&mut waves, &[input(1, Some(7))], &bots, &policy, at(6050)).is_empty());
     // Pushing bots inside the rally distance keep the push, even as others
     // fall back or respawn far away.
     let bots = BTreeMap::from([(1, vec![[5., 0., 0.], [120., 0., 0.]])]);
     assert!(advance_waves(&mut waves, &[input(1, Some(7))], &bots, &policy, at(9000)).is_empty());
-    // The push is wiped out: the next wave gathers again.
+    // Wiped out early: the push still lasts the rally wait.
     let bots = BTreeMap::from([(1, vec![[120., 0., 0.]])]);
+    assert!(advance_waves(&mut waves, &[input(1, Some(7))], &bots, &policy, at(10000)).is_empty());
+    // Then the next wave gathers again.
     assert_eq!(
-        advance_waves(&mut waves, &[input(1, Some(7))], &bots, &policy, at(10000)),
+        advance_waves(&mut waves, &[input(1, Some(7))], &bots, &policy, at(26000)),
         vec![(
             1,
             Some(Wave::Rally {
                 point: 7,
-                since: at(10000)
+                since: at(26000)
             })
         )]
     );
@@ -230,11 +240,23 @@ fn a_rally_ends_after_its_wait_and_squads_already_forward_push_at_once() {
     let inputs = [input(1, Some(7)), input(2, Some(7))];
     let changes = advance_waves(&mut waves, &inputs, &bots, &policy, at(0));
     assert_eq!(changes.len(), 2);
-    assert_eq!(waves[&2], Wave::Push { point: 7 });
+    assert_eq!(
+        waves[&2],
+        Wave::Push {
+            point: 7,
+            since: at(0)
+        }
+    );
     assert!(advance_waves(&mut waves, &inputs, &bots, &policy, at(19_999)).is_empty());
     assert_eq!(
         advance_waves(&mut waves, &inputs, &bots, &policy, at(20_000)),
-        vec![(1, Some(Wave::Push { point: 7 }))]
+        vec![(
+            1,
+            Some(Wave::Push {
+                point: 7,
+                since: at(20_000)
+            })
+        )]
     );
 }
 
@@ -267,8 +289,20 @@ fn waves_end_when_the_point_is_no_longer_open_or_rallies_are_off() {
 #[test]
 fn a_squad_without_living_bots_keeps_its_wave() {
     let policy = Policy::default();
-    let mut waves = BTreeMap::from([(1, Wave::Push { point: 7 })]);
+    let mut waves = BTreeMap::from([(
+        1,
+        Wave::Push {
+            point: 7,
+            since: at(0),
+        },
+    )]);
     let empty = BTreeMap::new();
     assert!(advance_waves(&mut waves, &[input(1, Some(7))], &empty, &policy, at(0)).is_empty());
-    assert_eq!(waves[&1], Wave::Push { point: 7 });
+    assert_eq!(
+        waves[&1],
+        Wave::Push {
+            point: 7,
+            since: at(0)
+        }
+    );
 }
