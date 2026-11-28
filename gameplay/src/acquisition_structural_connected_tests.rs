@@ -1006,3 +1006,75 @@ fn full_reward_outbox_cannot_commit_repair_queue_or_work_before_retry() {
     assert_eq!(e.pending_reward_batch().len(), 1);
     assert_eq!(e.active.as_ref().unwrap().repair_credit.sequence, 1);
 }
+
+fn last_record(engine: &crate::Engine<Vec<u8>>) -> serde_json::Value {
+    serde_json::from_slice(
+        engine
+            .writer
+            .split(|&b| b == b'\n')
+            .rfind(|r| !r.is_empty())
+            .unwrap(),
+    )
+    .unwrap()
+}
+
+fn destroyed_with_defender() -> crate::Engine<Vec<u8>> {
+    let mut engine = fixture();
+    interact(&mut engine, Kind::Activate, 1, 100).unwrap();
+    tick(&mut engine, 110);
+    tick(&mut engine, 130);
+    defender(&mut engine);
+    assert_eq!(row(&engine).state_actor.state, ObjectiveState::Completed);
+    engine
+}
+
+// Medius ends the session on any event error. The repair tool keeps sending
+// about twice a second, so a packet can still be in flight when its sender
+// dies or the structure finishes; both stay in the match.
+#[test]
+fn tool_packet_in_flight_when_the_repairer_dies_keeps_the_session() {
+    let mut engine = destroyed_with_defender();
+    repair(&mut engine, 141, Transport::Tcp).unwrap();
+    engine.active.as_mut().unwrap().life = CharacterLife::AwaitingRespawn { generation: 1 };
+    let credit = engine.active.as_ref().unwrap().repair_credit;
+    assert!(repair(&mut engine, 142, Transport::Tcp).unwrap().is_empty());
+    let record = last_record(&engine);
+    assert_eq!(record["op"], "acquisition_structural_repair");
+    assert_eq!(
+        record["gameplay_denial"],
+        "structural_repair_requires_live_actor"
+    );
+    assert_eq!(engine.active.as_ref().unwrap().repair_credit, credit);
+    // Work accepted before the death still survives the actor going away.
+    tick(&mut engine, 150);
+    assert_eq!(row(&engine).state_actor.state, ObjectiveState::Repairing);
+}
+
+#[test]
+fn tool_packet_after_the_structure_is_repaired_keeps_the_session() {
+    let mut engine = destroyed_with_defender();
+    repair(&mut engine, 141, Transport::Tcp).unwrap();
+    tick(&mut engine, 150);
+    repair(&mut engine, 151, Transport::Tcp).unwrap();
+    tick(&mut engine, 1150);
+    assert_eq!(row(&engine).state_actor.state, ObjectiveState::Repaired);
+    let before = row(&engine);
+    let credit = engine.active.as_ref().unwrap().repair_credit;
+    let rewards = engine.pending_reward_batch();
+    assert!(
+        repair(&mut engine, 1151, Transport::Tcp)
+            .unwrap()
+            .is_empty()
+    );
+    let record = last_record(&engine);
+    assert_eq!(record["op"], "acquisition_structural_repair");
+    assert_eq!(
+        record["gameplay_denial"],
+        "structural_objective_not_repairable"
+    );
+    assert_eq!(row(&engine), before);
+    assert_eq!(engine.active.as_ref().unwrap().repair_credit, credit);
+    assert_eq!(engine.pending_reward_batch(), rewards);
+    tick(&mut engine, 1200);
+    assert_eq!(row(&engine).state_actor.state, ObjectiveState::Repaired);
+}

@@ -386,3 +386,65 @@ fn failed_record_rolls_back_the_structural_queue_and_repair_credit() {
     assert_eq!(engine.pending_reward_batch().len(), 1);
     assert_eq!(engine.active.as_ref().unwrap().repair_credit.sequence, 1);
 }
+
+fn last_record(engine: &Engine<Vec<u8>>) -> serde_json::Value {
+    serde_json::from_slice(
+        engine
+            .writer
+            .split(|&b| b == b'\n')
+            .rfind(|r| !r.is_empty())
+            .unwrap(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn tool_packet_in_flight_when_the_repairer_dies_is_an_audited_denial() {
+    let mut engine = repair_fixture();
+    engine.active.as_mut().unwrap().life = CharacterLife::AwaitingRespawn { generation: 1 };
+    let credit = engine.active.as_ref().unwrap().repair_credit;
+    // Medius ends the session on any event error, so the late packet
+    // must be refused as gameplay, not as a protocol failure.
+    assert!(repair(&mut engine, 200).unwrap().is_empty());
+    let record = last_record(&engine);
+    assert_eq!(record["op"], "domination_structural_repair");
+    assert_eq!(
+        record["gameplay_denial"],
+        "structural_repair_requires_live_actor"
+    );
+    let world = engine.objective_world.as_ref().unwrap();
+    assert_eq!(world.state(0), Some(ObjectiveState::Completed));
+    assert_eq!(engine.active.as_ref().unwrap().repair_credit, credit);
+    assert!(engine.pending_reward_batch().is_empty());
+}
+
+#[test]
+fn tool_packet_after_the_structure_is_repaired_is_an_audited_denial() {
+    let mut e = repair_fixture();
+    e.ground_runtime = Some(Default::default());
+    let setup = &mut e.domination_gameplay.as_mut().unwrap().state;
+    Arc::make_mut(&mut setup.known_empty_vehicle_spawns).insert(2);
+    setup.ground_respawn_physics = Some(Default::default());
+    repair(&mut e, 200).unwrap();
+    e.tick_domination_objectives(test_time(200), 1).unwrap();
+    repair(&mut e, 201).unwrap();
+    e.tick_domination_objectives(test_time(1200), 1).unwrap();
+    let world = e.objective_world.as_ref().unwrap();
+    assert_eq!(world.state(0), Some(ObjectiveState::Repaired));
+    let snapshot = world.snapshot(1, 1700).objectives[0];
+    let credit = e.active.as_ref().unwrap().repair_credit;
+    let rewards = e.pending_reward_batch();
+
+    // The held tool fires again before the client sees the Repaired state.
+    assert!(repair(&mut e, 1700).unwrap().is_empty());
+    let record = last_record(&e);
+    assert_eq!(record["op"], "domination_structural_repair");
+    assert_eq!(
+        record["gameplay_denial"],
+        "structural_objective_not_repairable"
+    );
+    let world = e.objective_world.as_ref().unwrap();
+    assert_eq!(world.snapshot(1, 1700).objectives[0], snapshot);
+    assert_eq!(e.active.as_ref().unwrap().repair_credit, credit);
+    assert_eq!(e.pending_reward_batch(), rewards);
+}

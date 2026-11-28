@@ -493,8 +493,26 @@ impl<W: Write> Engine<W> {
                     == Some(objective_catalog::NativeClass::Structural)
             })
         {
-            let (authority, leadership) = self
-                .plan_structural_repair_authority(self.acquisition_structural_repair_tool(), now)?;
+            use crate::structural_repair_authority::StructuralRepairAdmission;
+            let (authority, leadership) = match self.admit_structural_repair(
+                request.target_object_id,
+                self.acquisition_structural_repair_tool(),
+                now,
+            )? {
+                StructuralRepairAdmission::Admitted(authority, leadership) => {
+                    (authority, leadership)
+                }
+                StructuralRepairAdmission::Denied(code) => {
+                    return self.record_structural_repair_denial(
+                        "acquisition_structural_repair",
+                        &event,
+                        request.target_object_id,
+                        code,
+                        now,
+                        wall_secs,
+                    );
+                }
+            };
             return self.event_acquisition_structural(
                 &event,
                 acquisition_gameplay_engine::StructuralInput::Repair(

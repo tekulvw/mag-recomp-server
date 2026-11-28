@@ -355,3 +355,22 @@ fn repair_contribution_uses_owned_repair_modifier_in_leadership_plan() {
     assert_eq!(actor.leadership.unwrap().state.level(), 1);
     assert_eq!(actor.modifiers.value("kCharModRepairAmount"), 0.25);
 }
+
+#[test]
+fn only_timing_races_become_repair_denials() {
+    for code in super::STRUCTURAL_REPAIR_RACE_DENIALS {
+        assert!(super::is_structural_repair_race_denial(code));
+    }
+    // Off-team tools, unknown targets, bad state and sequence exhaustion
+    // are not timing races and still end the event as an error.
+    for code in [
+        "structural_repair_requires_live_owner",
+        "structural_repair_tool_source_required",
+        "objective_invalid_target",
+        "unknown_native_objective",
+        "invalid_structural_damage_model_health",
+        "sequence_exhausted",
+    ] {
+        assert!(!super::is_structural_repair_race_denial(code), "{code}");
+    }
+}
