@@ -144,7 +144,6 @@ impl Active {
             self.clear_live_projectiles(now)?;
             self.last_exit = None;
             self.pending_spawn_deadline = None;
-            self.respawn_screen_ready_at = None;
             self.release_seat_on_death();
             CharacterLife::AwaitingRespawn { generation }
         } else {

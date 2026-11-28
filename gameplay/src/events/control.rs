@@ -377,9 +377,6 @@ pub(super) fn confirm_respawn<W: Write>(
     // condition of a downed character before its dead check, so the
     // confirmation gives up the downed life and then joins the queue.
     let gave_up = super::combat::plan_downed_give_up(ctx, plan)?;
-    // The client confirms by itself when its respawn screen opens, so it can
-    // take a new life from now on.
-    plan.session.respawn_screen_open = true;
     let life = plan.combat.new_life.unwrap_or(active.life);
     let eligible = active.entered_game
         && active.ready_for_updates
@@ -395,7 +392,17 @@ pub(super) fn confirm_respawn<W: Write>(
         && active.emplacement_creation.is_some()
         && ctx.engine.actor_matches_team(active)
         && life.next_generation().is_some();
-    if eligible && active.pending_spawn_deadline.is_none() {
+    // A confirmation takes the team's next wave, as in retail, even when the
+    // character already rejoined the queue by itself for a later one: its
+    // respawn screen is open, so the respawn queue's cutoff no longer applies.
+    let earlier_wave = match (
+        active.pending_spawn_deadline,
+        ctx.engine.team_waves[usize::from(active.team())],
+    ) {
+        (Some(pending), Some(clock)) => Some(clock.next_after(now)?).filter(|next| *next < pending),
+        _ => None,
+    };
+    if eligible && (active.pending_spawn_deadline.is_none() || earlier_wave.is_some()) {
         // Reserve room for both the deadline and its physical spawn.
         if ctx.engine.maximum_players == 1
             && active.replication_history.len() + 2 > MAX_REPLICATION_HISTORY
@@ -432,6 +439,7 @@ pub(super) fn confirm_respawn<W: Write>(
         "downed_give_up_generation":gave_up,
         "already_spawned":active.life.is_alive(),
         "queued":plan.session.new_spawn_deadline.or(active.pending_spawn_deadline).is_some(),
+        "moved_to_earlier_wave":earlier_wave.is_some() && plan.session.new_spawn_deadline.is_some(),
         "deadline_ms":plan.session.new_spawn_deadline.or(active.pending_spawn_deadline).map(|d|d.as_millis() as u32),
         "replication_sequence":if plan.replication.wave_delta.is_some() || plan.replication.damage_delta.is_some(){Some(next_sequence)}else{None},
         "spawn_point_index":active.selected_spawn.map_or(active.squad_spawn,|s|s.spawn_point_index),

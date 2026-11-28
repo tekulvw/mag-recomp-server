@@ -3,21 +3,38 @@
 //! owner's next update.
 use super::*;
 
-/// How long the original client keeps a character that bled out on its own
-/// before it opens the respawn screen and confirms by itself: the retail
-/// character gameplay setting `fRespawnTime` (see docs/incapacitation.md).
-pub(crate) const BLEED_OUT_RESPAWN_SCREEN_DELAY: Duration = Duration::from_millis(2500);
+/// The respawn queue's wave cutoff: a dead character that rejoins the queue
+/// by itself less than this long before its team's wave goes to the
+/// following wave, unless its client confirms in time for the earlier one.
+///
+/// Retail has no such constant. Its server queues a dead character only when
+/// the client confirms, and the original client confirms by itself only once
+/// its respawn screen opens: `fRespawnTime` (2.5 s) after the death, a few
+/// frames later and once loading is complete. A death within about 3 s of a
+/// wave therefore missed it, and a confirmation made any time before a wave
+/// took that wave. The automatic requeue here does not wait for that
+/// confirmation, so it keeps the same distance itself: `fRespawnTime` plus 1 s
+/// for the confirmation's frames, delivery and the world tick, which also
+/// leaves the respawn screen's whole-second timer above zero when it opens.
+/// A confirmation still takes the next wave (see `confirm_respawn`).
+///
+/// A life sent before the respawn screen opens reaches a client still playing
+/// the death, and that client never leaves the state the new life starts in:
+/// a parachute drop falls without a parachute, the kit is not rebuilt (no
+/// new magazines), the client stops reporting its state and confirming its
+/// respawns, and every later life of that connection starts the same way.
+pub(crate) const RESPAWN_QUEUE_CUTOFF: Duration = Duration::from_millis(3500);
 
-impl Active {
-    /// The time from which this dead character's next wave is chosen: now, or
-    /// later while its client is still counting down to its respawn screen.
-    /// A life sent before that screen opens reaches a client that is still
-    /// playing its bleed-out, which then never leaves the state the new life
-    /// starts in (a parachute drop never lands, and the character can no
-    /// longer enter a vehicle).
-    pub(crate) fn respawn_queue_floor(&self, now: Duration) -> Duration {
-        self.respawn_screen_ready_at
-            .map_or(now, |ready| ready.max(now))
+impl TeamWaveClock {
+    /// The wave a dead character that enters the queue at `entry` by itself
+    /// (after any death: a kill, a self kill, a fall, an admin kill or a
+    /// bleed-out) spawns on: the first one more than the cutoff later.
+    pub(crate) fn wave_after_death(self, entry: Duration) -> Result<Duration, &'static str> {
+        self.next_after(
+            entry
+                .checked_add(RESPAWN_QUEUE_CUTOFF)
+                .ok_or("wave_clock_overflow")?,
+        )
     }
 }
 
@@ -35,8 +52,8 @@ impl<W: Write> Engine<W> {
             && update_actions::respawn_point(self, actor).is_some()
     }
 
-    /// Queue every dead human that rejoins by itself for its team's next wave,
-    /// at the world tick that first sees it dead. A dead client sends owner
+    /// Queue every dead human that rejoins by itself for its team's first wave
+    /// past the cutoff, at the world tick that first sees it dead. A dead client sends owner
     /// updates only about once a second, so waiting for one let a wave that
     /// fell between the death (or bleed-out) and that update go by unused.
     /// The owner's next update spawns it once the wave is due.
@@ -75,7 +92,7 @@ impl<W: Write> Engine<W> {
             queued.push((
                 actor.reservation.id.clone(),
                 team,
-                clock.next_after(actor.respawn_queue_floor(now))?,
+                clock.wave_after_death(now)?,
             ));
         }
         if queued.is_empty() {

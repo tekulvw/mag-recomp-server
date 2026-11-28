@@ -146,7 +146,12 @@ impl<W: Write> Engine<W> {
             let Some(clock) = self.team_waves[usize::from(team)] else {
                 continue;
             };
-            let deadline = clock.next_after(now)?;
+            // A queued character counts down to the wave it spawns on, which
+            // the respawn queue's cutoff can put one past the team's next wave.
+            let deadline = match actor.pending_spawn_deadline {
+                Some(deadline) => deadline,
+                None => clock.next_after(now)?,
+            };
             if actor.published_wave_deadline == Some(deadline) {
                 continue;
             }

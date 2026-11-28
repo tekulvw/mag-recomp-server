@@ -132,11 +132,6 @@ struct SessionChanges {
     new_team_wave: Option<TeamWaveClock>,
     published_wave_deadline: Option<Duration>,
     cancel_pending_spawn: bool,
-    /// The character bled out on its own; its client opens the respawn
-    /// screen at this time.
-    respawn_screen_ready_at: Option<Duration>,
-    /// The client confirmed its respawn, so its respawn screen is open.
-    respawn_screen_open: bool,
     /// The dead character rejoined the respawn queue without a new
     /// confirmation (see `plan_update_reply`).
     automatic_respawn_queue: bool,
@@ -1234,7 +1229,6 @@ impl<W: Write> Engine<W> {
             if !life.is_alive() || plan.replication.spawn_delta.is_some() {
                 active.last_exit = None;
                 active.pending_spawn_deadline = None;
-                active.respawn_screen_ready_at = None;
             }
         }
         if plan.session.cancel_pending_spawn {
@@ -1243,12 +1237,6 @@ impl<W: Write> Engine<W> {
             active.pending_spawn_deadline = None;
             // Stay out of the queue until the player confirms again.
             active.respawn_held = true;
-        }
-        if plan.session.respawn_screen_ready_at.is_some() {
-            active.respawn_screen_ready_at = plan.session.respawn_screen_ready_at;
-        }
-        if plan.session.respawn_screen_open {
-            active.respawn_screen_ready_at = None;
         }
         if let Some(deadline) = plan.session.new_spawn_deadline {
             active.pending_spawn_deadline = Some(deadline);
