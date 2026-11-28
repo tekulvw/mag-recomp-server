@@ -724,14 +724,19 @@ impl<W: Write> Engine<W> {
             if self.bot_spawn_routes.inline {
                 self.bot_registry.spawn_qualification.clear();
                 self.bot_registry.lane_spawns.clear();
+                self.bot_spawn_routes.forget();
             } else {
                 let keys = self.bot_registry.spawn_qualification.keys().copied();
                 self.bot_registry.stale_spawn_qualification.extend(keys);
                 let keys = self.bot_registry.lane_spawns.keys().copied();
                 self.bot_registry.stale_lane_spawns.extend(keys);
+                // Routes already queued still answer, through the gates they
+                // were planned with; the answers are kept as stale ones
+                // instead of being thrown away and routed once more.
+                self.bot_spawn_routes.last_prefetch = None;
+                self.bot_spawn_routes.prefetch_resume = false;
             }
             self.bot_registry.spawn_route_gates = gates;
-            self.bot_spawn_routes.forget();
         }
     }
 
@@ -1112,16 +1117,27 @@ impl<W: Write> Engine<W> {
                     .navmesh_world
                     .as_ref()
                     .is_some_and(|mesh| std::sync::Arc::ptr_eq(mesh, &answer.mesh))
-                || answer.gates != gates
             {
                 continue;
             }
+            // An answer routed through gates that have changed since is kept,
+            // stale, until its revalidation (`refresh_spawn_route_caches`).
+            let stale = answer.gates != gates;
             match (answer.key, answer.result) {
                 (SpawnRouteKey::Lane(index, objective, slot), SpawnRouteResult::Lane(result)) => {
-                    self.store_lane_spawn((index, objective, slot), result, receipts)
+                    let key = (index, objective, slot);
+                    self.store_lane_spawn(key, result, receipts);
+                    if stale {
+                        self.bot_registry.stale_lane_spawns.insert(key);
+                    }
                 }
                 (SpawnRouteKey::Point(index, home), SpawnRouteResult::Point(result)) => {
-                    self.store_spawn_qualification((index, home), result, receipts)
+                    self.store_spawn_qualification((index, home), result, receipts);
+                    if stale {
+                        self.bot_registry
+                            .stale_spawn_qualification
+                            .insert((index, home));
+                    }
                 }
                 _ => {}
             }

@@ -129,8 +129,10 @@ So the server never routes for a spawn choice inside the world tick:
   the navmesh first, the worker answered about a tenth of the lane checks it
   had before. A stale answer can be up to about 15 s out of date after a gate
   change: a life may use a point a structure has just walled off, or skip one
-  that has just opened. Synthetic tests that route inline still route again
-  at once.
+  that has just opened. Routes already queued when the gates change still
+  answer, through the gates they were planned with, and their answers are
+  kept the same way instead of being dropped and routed once more. Synthetic
+  tests that route inline still route again at once.
 - The defender lane points every population slot will ask for are queued
   ahead, at most once a second: while humans wait for their side's first
   wave, so the first defender lives normally already have their forward

@@ -1278,7 +1278,7 @@ fn a_slow_defender_route_never_holds_the_spawn_choice() {
 }
 
 #[test]
-fn queued_routes_through_replaced_structure_gates_are_routed_again() {
+fn queued_routes_through_replaced_structure_gates_are_kept_stale_and_routed_again() {
     let mut engine = engine_with_defence();
     engine.bot_spawn_routes.inline = false;
     engine.bot_spawn_routes.blocking = true;
@@ -1287,20 +1287,27 @@ fn queued_routes_through_replaced_structure_gates_are_routed_again() {
     let (first, _) = choose_defender(&mut engine, 200, &Default::default());
     assert_eq!(first.arrival, Arrival::PopulationSlot);
     // The gates change while the answers are in flight.
-    let structures = std::sync::Arc::new(crate::bot_structure_collision::StructureObstacles::new(
-        &crate::domination_structural_world::SequenceCollisionState::default(),
-        1,
-    ));
-    let mesh = engine.navmesh_world.clone().unwrap();
-    crate::navmesh_structure_gates::install_now(&mesh, Some(&structures)).unwrap();
+    change_structure_gates(&mut engine, 1);
     engine.wait_bot_spawn_routes(1).unwrap();
+    // The answers through the old gates are used rather than thrown away...
     let (stale, receipts) = choose_defender(&mut engine, 200, &Default::default());
-    assert_eq!(
-        stale.arrival,
-        Arrival::PopulationSlot,
-        "answers routed through the old gates are dropped"
+    assert!(
+        [Some(NORTH), Some(SOUTH)].contains(&stale.spawn_point),
+        "{stale:?}"
     );
-    assert_eq!(lane_receipts(&receipts), 0, "{receipts:?}");
+    assert!(lane_receipts(&receipts) > 0);
+    assert!(!engine.bot_registry.stale_lane_spawns.is_empty());
+    // ...and routed again through the current gates.
+    engine
+        .prefetch_bot_spawn_routes(Duration::from_secs(1), 1)
+        .unwrap();
+    assert!(
+        engine
+            .bot_spawn_routes
+            .pending
+            .iter()
+            .any(|key| matches!(key, SpawnRouteKey::Lane(..)))
+    );
     engine.wait_bot_spawn_routes(1).unwrap();
     let (current, receipts) = choose_defender(&mut engine, 200, &Default::default());
     assert!(
