@@ -703,6 +703,30 @@ thread_local! {
     static FOREGROUND: Cell<bool> = const { Cell::new(false) };
 }
 
+/// Nice value of off-tick navmesh workers ([`lower_worker_priority`]).
+const WORKER_NICE: c_int = 10;
+#[cfg(target_os = "linux")]
+unsafe extern "C" {
+    fn setpriority(which: c_int, who: u32, prio: c_int) -> c_int;
+    fn gettid() -> i32;
+}
+/// Lower this thread's CPU priority: called first by each off-tick worker
+/// whose navmesh searches run beside the world tick (spawn routes, squad
+/// routes, structure gates, cover), so where cores are short the tick runs
+/// first. Linux only, where the nice value is per thread; a no-op elsewhere
+/// and with [`SHARED_QUERY_ENV`], whose workers wait for ticks instead.
+pub(crate) fn lower_worker_priority() {
+    if std::env::var_os(SHARED_QUERY_ENV).is_some_and(|v| v == "1") {
+        return;
+    }
+    #[cfg(target_os = "linux")]
+    // PRIO_PROCESS with a thread id sets that one thread's nice value.
+    unsafe {
+        setpriority(0, gettid() as u32, WORKER_NICE);
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = WORKER_NICE;
+}
 /// Longest a background query waits for running world ticks before it takes
 /// its turn anyway, so a world that is always ticking cannot starve it.
 const BACKGROUND_WAIT_LIMIT: Duration = Duration::from_millis(200);

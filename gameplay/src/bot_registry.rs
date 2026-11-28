@@ -3353,6 +3353,7 @@ impl<W: Write> Engine<W> {
                     let (mesh, rules, goals, starts) =
                         (mesh.clone(), rules.clone(), goals.clone(), starts.clone());
                     move || {
+                        crate::navmesh::lower_worker_priority();
                         let _ = answer.send(squad_routes(&mesh, &rules, &goals, &starts));
                     }
                 });
