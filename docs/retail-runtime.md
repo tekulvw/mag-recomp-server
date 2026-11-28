@@ -339,7 +339,8 @@ bindings, without rereading files.
 
 This support covers the human candidate/protocol path and offline synthetic
 verification. It does not establish aircraft simulation or full original client
-entry parity. Bots retain their existing physical population and respawn paths;
-objective progression does not teleport them into parachute locations. Extracted
+entry parity. Objective progression does not teleport living bots into parachute
+locations; a bot life spawned at an open drop zone descends under its
+parachute ([bot-active-spawns.md](bot-active-spawns.md#parachute-points)). Extracted
 world poses, runtime identity evidence and any private client acceptance remain
 external inputs and evidence, outside public source distribution.

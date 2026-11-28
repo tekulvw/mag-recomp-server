@@ -333,8 +333,9 @@ fn a_full_forward_drop_zone_falls_back_to_the_population_slot() {
     }
 }
 
-#[test]
-fn a_dead_bot_respawns_at_the_forward_point_after_activation() {
+/// A squad 0 bot that has just died, with the squad's drop zone open, an
+/// observer that holds every bot snapshot, and the bot's generation.
+fn dead_bot_with_open_drop_zone() -> (Engine<Vec<u8>>, u16, u32) {
     let mut engine = engine();
     engine
         .reconcile_bot_population(Duration::ZERO, 1, &mut Default::default())
@@ -379,6 +380,12 @@ fn a_dead_bot_respawns_at_the_forward_point_after_activation() {
             Duration::from_millis(500),
         )
         .unwrap();
+    (engine, id, generation)
+}
+
+#[test]
+fn a_dead_bot_respawns_at_the_forward_point_after_activation() {
+    let (mut engine, id, generation) = dead_bot_with_open_drop_zone();
     engine.tick_bots(Duration::from_secs(120), 2).unwrap();
     let bot = &engine.bot_registry.bots[&id];
     let runtime = bot.target.runtime.unwrap();
@@ -392,6 +399,244 @@ fn a_dead_bot_respawns_at_the_forward_point_after_activation() {
         .expect("a respawn receipt");
     assert_eq!(respawn["spawn_point_index"], DROP);
     assert_eq!(respawn["arrival"], "parachute_landing");
+}
+
+/// The synthetic drop zone's airborne height and parachute yaw.
+const DROP_TOP: f32 = 40.;
+const DROP_YAW: u16 = 256;
+
+fn observer_packets(engine: &mut Engine<Vec<u8>>) -> Vec<Vec<u8>> {
+    engine
+        .active
+        .as_mut()
+        .unwrap()
+        .pending_shared
+        .drain(..)
+        .collect()
+}
+
+fn descent_delta(
+    engine: &Engine<Vec<u8>>,
+    id: u16,
+    now: Duration,
+    y: f32,
+    state: Option<u8>,
+) -> Vec<u8> {
+    let fields = player_tracking::ClientCharacterFields {
+        state: state.map(|state| replication::CharacterState {
+            state,
+            stance: 0,
+            user_data: [0; 3],
+        }),
+        position: Some(replication::CharacterPosition { x: 20., y, z: 30. }),
+        ..Default::default()
+    };
+    replication::multiplayer::CharacterOwnerDelta {
+        sequence: 2,
+        timestamp_ms: now.as_millis() as u32,
+        player: id,
+        fields: &fields,
+    }
+    .encode_with_profile(engine.wire_profile)
+    .unwrap()
+}
+
+fn receipts(engine: &Engine<Vec<u8>>, op: &str) -> Vec<Value> {
+    String::from_utf8(engine.writer.clone())
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .filter(|entry| entry["op"] == op)
+        .collect()
+}
+
+#[test]
+fn a_drop_zone_life_comes_down_under_its_parachute_and_lands_standing() {
+    let (mut engine, id, _) = dead_bot_with_open_drop_zone();
+    observer_packets(&mut engine);
+    let spawn = Duration::from_secs(120);
+    engine.tick_bots(spawn, 2).unwrap();
+    // The life starts in the parachute state straight above its landing
+    // spot, at the drop zone's airborne height, facing its parachute yaw.
+    let bot = &engine.bot_registry.bots[&id];
+    let descent = bot.descent.expect("a parachute descent");
+    let runtime = bot.target.runtime.unwrap();
+    let lands = spawn + Duration::from_secs_f64(f64::from(DROP_TOP - runtime.position.y) / 6.4);
+    assert!(descent.lands.abs_diff(lands) < Duration::from_millis(1));
+    let lands = descent.lands;
+    assert!(
+        runtime.position.y.abs() < 0.05,
+        "the body is reserved at its landing spot"
+    );
+    assert!(!runtime.physics_motion.unwrap().grounded);
+    let airborne = dummy::airborne_respawn_for(
+        id,
+        2,
+        spawn.as_millis() as u32,
+        replication::CharacterPosition {
+            x: 20.,
+            y: DROP_TOP,
+            z: 30.,
+        },
+        DROP_YAW,
+        &bot.target.loadout,
+        engine.wire_profile,
+    )
+    .unwrap();
+    assert!(observer_packets(&mut engine).contains(&airborne));
+    assert!(
+        receipts(&engine, "bot_respawn")[0]["descent_ms"]
+            .as_u64()
+            .unwrap()
+            >= 6000
+    );
+
+    // Every 250 ms it publishes its height, and nothing else moves it.
+    let t = spawn + Duration::from_millis(250);
+    engine.tick_bots(t, 3).unwrap();
+    let packets = observer_packets(&mut engine);
+    let height = engine.bot_registry.bots[&id].descent.unwrap().position(t).y;
+    assert!((height - (DROP_TOP - 1.6)).abs() < 0.01, "{height}");
+    assert!(packets.contains(&descent_delta(&engine, id, t, height, None)));
+    engine.tick_bots(t + Duration::from_millis(50), 3).unwrap();
+    assert!(
+        observer_packets(&mut engine).is_empty(),
+        "no publication between intervals"
+    );
+
+    // At touchdown it stands on its landing spot, grounded, and goes on.
+    engine.tick_bots(lands, 4).unwrap();
+    let packets = observer_packets(&mut engine);
+    let bot = &engine.bot_registry.bots[&id];
+    assert!(bot.descent.is_none());
+    let runtime = bot.target.runtime.unwrap();
+    // Its body is the one placed at the landing spot; physics grounds it on
+    // the next step as it does any new life.
+    assert_eq!(
+        runtime.physics_motion.unwrap().position,
+        descent.motion.position
+    );
+    let landing = runtime.position;
+    assert!(packets.contains(&descent_delta(&engine, id, lands, landing.y, Some(1))));
+    let landed = receipts(&engine, "bot_parachute_landed");
+    assert_eq!(landed.len(), 1);
+    assert_eq!(landed[0]["object_index"], id);
+}
+
+#[test]
+fn a_late_joiner_meets_a_descending_bot_under_its_parachute() {
+    // A recipient that takes the bot's snapshot mid-descent (a joiner, or one
+    // still waiting for its paced snapshot batch) gets the parachute state and
+    // the current height, not a standing body on the ground.
+    let (mut engine, id, _) = dead_bot_with_open_drop_zone();
+    let spawn = Duration::from_secs(120);
+    engine.tick_bots(spawn, 2).unwrap();
+    let t = spawn + Duration::from_secs(3);
+    let profile = engine.wire_profile;
+    let bot = &engine.bot_registry.bots[&id];
+    let height = bot.descent.unwrap().position(t).y;
+    assert!(height > 15. && height < 25., "{height}");
+    let mut loadout = bot.target.loadout.clone();
+    loadout.primary = bot.firearm.item(loadout.primary);
+    let runtime = bot.target.runtime.unwrap();
+    let expected = |state: replication::CharacterState, y: f32| {
+        dummy::character_snapshot(
+            id,
+            1,
+            t.as_millis() as u32,
+            &loadout,
+            bot.target.faction,
+            profile,
+            bot.target.display_name.as_deref().unwrap(),
+            bot.target.squad,
+            Some(&replication::CharacterRespawn {
+                sequence: 1,
+                timestamp_ms: t.as_millis() as u32,
+                object_index: id,
+                state,
+                position: replication::CharacterPosition {
+                    y,
+                    ..runtime.position
+                },
+                pitch: bot.firearm.packed_pitch(),
+                yaw: bot.yaw,
+                damage: bot.damage,
+            }),
+            bot.appearance(),
+        )
+        .unwrap()
+    };
+    let snapshot = bot.snapshot(t, profile).unwrap();
+    assert_eq!(
+        snapshot,
+        expected(crate::bot_parachute::parachute_state(), height)
+    );
+    assert_ne!(
+        snapshot,
+        expected(
+            replication::CharacterState {
+                state: 1,
+                stance: 0,
+                user_data: [0; 3]
+            },
+            runtime.position.y
+        )
+    );
+    assert_eq!(bot.yaw, DROP_YAW);
+}
+
+#[test]
+fn a_bot_shot_down_under_its_parachute_dies_and_its_next_life_drops_again() {
+    let (mut engine, id, _) = dead_bot_with_open_drop_zone();
+    let spawn = Duration::from_secs(120);
+    engine.tick_bots(spawn, 2).unwrap();
+    let generation = engine.bot_registry.bots[&id]
+        .target
+        .runtime
+        .unwrap()
+        .generation;
+    engine
+        .commit_bot_damage(
+            id,
+            generation,
+            replication::CharacterDamage {
+                health_quarter_points: 0,
+                ..bot_registry_initial_damage()
+            },
+            spawn + Duration::from_secs(2),
+        )
+        .unwrap();
+    let bot = &engine.bot_registry.bots[&id];
+    assert!(
+        bot.descent.is_none(),
+        "a body hit in the air stops descending"
+    );
+    observer_packets(&mut engine);
+    engine
+        .tick_bots(spawn + Duration::from_millis(2250), 3)
+        .unwrap();
+    assert!(
+        engine.bot_registry.bots[&id].descent.is_none(),
+        "a dead body publishes no descent"
+    );
+    assert!(receipts(&engine, "bot_parachute_landed").is_empty());
+    // The next life at the open drop zone comes down under its parachute too.
+    engine.tick_bots(Duration::from_secs(240), 4).unwrap();
+    let bot = &engine.bot_registry.bots[&id];
+    assert_eq!(bot.target.runtime.unwrap().generation, generation + 1);
+    assert!(bot.descent.is_some());
+}
+
+#[test]
+fn a_ground_point_life_still_arrives_standing() {
+    let (mut engine, id, _) = dead_bot_with_open_drop_zone();
+    // Close the drop zone again: the life uses its population slot.
+    engine.spawn_catalog = Some(spawns());
+    engine.tick_bots(Duration::from_secs(120), 2).unwrap();
+    let bot = &engine.bot_registry.bots[&id];
+    assert!(bot.descent.is_none());
+    assert_eq!(bot.yaw, 0);
+    assert!(receipts(&engine, "bot_respawn")[0]["descent_ms"].is_null());
 }
 
 fn bot_registry_initial_damage() -> replication::CharacterDamage {

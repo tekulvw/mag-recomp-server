@@ -60,6 +60,7 @@ mod bot_medic_approach;
 pub mod bot_names;
 pub mod bot_navigation;
 mod bot_objectives;
+mod bot_parachute;
 mod bot_perception;
 #[cfg(test)]
 mod bot_perception_tests;
