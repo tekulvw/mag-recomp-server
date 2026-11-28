@@ -141,9 +141,9 @@ fn point(p: replication::CharacterPosition) -> [f64; 3] {
 /// life and neither cached nor reported.
 pub(crate) const SPAWN_ROUTE_PENDING: &str = "bot_spawn_route_pending";
 const SPAWN_ROUTE_PREFETCH_INTERVAL: Duration = Duration::from_secs(1);
-/// How often a point qualification from earlier structure gates is routed
-/// again (`refresh_spawn_route_caches`).
-const POINT_REVALIDATE_INTERVAL: Duration = Duration::from_secs(15);
+/// How often a qualification from earlier structure gates is routed again
+/// (`refresh_spawn_route_caches`).
+const REVALIDATE_INTERVAL: Duration = Duration::from_secs(15);
 /// Spawn points whose placements one prefetch pass may probe. Probing a point
 /// costs a few milliseconds (a parachute point's drop line searches 400 m
 /// down per jumper), so a pass that meets more uncached points stops there and
@@ -708,11 +708,12 @@ impl<W: Write> Engine<W> {
 
     /// Cached spawn routes hold only for the structure gates they were
     /// planned through: a destroyed or repaired structure opens or seals ways.
-    /// Lane routes are routed again. A point qualification (does the slot
-    /// reach the point at all) stays in use, marked stale, until the prefetch
-    /// revalidates it, at most once per `POINT_REVALIDATE_INTERVAL`: gates
-    /// change between almost every wave of a Domination match, and routing
-    /// every point again after each change kept the shared navmesh busy.
+    /// A qualification (point or lane, usable or not) from earlier gates stays
+    /// in use, marked stale, and is routed again at most once per
+    /// `REVALIDATE_INTERVAL` per key. Gates change between almost every wave
+    /// of a Domination match, and routing every point and lane again after
+    /// each change kept the shared navmesh worker busy: once world ticks took
+    /// the navmesh first (#427), it answered a tenth of the lane checks it had.
     /// With inline routing (synthetic tests) they are routed again at once.
     fn refresh_spawn_route_caches(&mut self) {
         let gates = self
@@ -722,14 +723,26 @@ impl<W: Write> Engine<W> {
         if self.bot_registry.spawn_route_gates != gates {
             if self.bot_spawn_routes.inline {
                 self.bot_registry.spawn_qualification.clear();
+                self.bot_registry.lane_spawns.clear();
             } else {
                 let keys = self.bot_registry.spawn_qualification.keys().copied();
                 self.bot_registry.stale_spawn_qualification.extend(keys);
+                let keys = self.bot_registry.lane_spawns.keys().copied();
+                self.bot_registry.stale_lane_spawns.extend(keys);
             }
-            self.bot_registry.lane_spawns.clear();
             self.bot_registry.spawn_route_gates = gates;
             self.bot_spawn_routes.forget();
         }
+    }
+
+    /// Whether a stale lane qualification is due to be routed again.
+    fn lane_revalidation_due(&self, key: (u16, u16, bool), now: Duration) -> bool {
+        self.bot_registry.stale_lane_spawns.contains(&key)
+            && self
+                .bot_registry
+                .lane_revalidated_at
+                .get(&key)
+                .is_none_or(|&queued| now >= queued + REVALIDATE_INTERVAL)
     }
 
     /// A defender's forward spawn: an operational hospital of its side, a
@@ -851,6 +864,7 @@ impl<W: Write> Engine<W> {
         now: Duration,
         wall: u64,
     ) -> Result<(), &'static str> {
+        self.bot_registry.spawn_route_clock = now;
         if self.bot_spawn_routes.inline
             || (!self.bot_spawn_routes.prefetch_resume
                 && self
@@ -903,7 +917,7 @@ impl<W: Write> Engine<W> {
                             .bot_registry
                             .spawn_revalidated_at
                             .get(&key)
-                            .is_none_or(|&queued| now >= queued + POINT_REVALIDATE_INTERVAL);
+                            .is_none_or(|&queued| now >= queued + REVALIDATE_INTERVAL);
                     if (self.bot_registry.spawn_qualification.contains_key(&key) && !revalidate)
                         || self.bot_spawn_routes.pending.contains(&route_key)
                     {
@@ -936,8 +950,9 @@ impl<W: Write> Engine<W> {
                 let slot = index == home;
                 let key = (index, lane.0, slot);
                 let route_key = SpawnRouteKey::Lane(index, lane.0, slot);
+                let revalidate = self.lane_revalidation_due(key, now);
                 if !seen.insert(key)
-                    || self.bot_registry.lane_spawns.contains_key(&key)
+                    || (self.bot_registry.lane_spawns.contains_key(&key) && !revalidate)
                     || self.bot_spawn_routes.pending.contains(&route_key)
                 {
                     continue;
@@ -960,6 +975,9 @@ impl<W: Write> Engine<W> {
                     if self.bot_spawn_routes.queue(route_key, gates, job).is_err() {
                         return Ok(());
                     }
+                    if revalidate {
+                        self.bot_registry.lane_revalidated_at.insert(key, now);
+                    }
                 }
             }
         }
@@ -981,10 +999,23 @@ impl<W: Write> Engine<W> {
         let slot = index == home;
         let key = (index, objective, slot);
         self.collect_bot_spawn_routes(receipts);
-        if let Some(cached) = self.bot_registry.lane_spawns.get(&key) {
-            return cached.clone();
-        }
         let route_key = SpawnRouteKey::Lane(index, objective, slot);
+        if let Some(cached) = self.bot_registry.lane_spawns.get(&key).cloned() {
+            // A stale answer stays in use; one the prefetch does not cover (a
+            // goal other than the defended lane) is routed again from here.
+            let now = self.bot_registry.spawn_route_clock;
+            if !self.bot_spawn_routes.inline
+                && self.lane_revalidation_due(key, now)
+                && !self.bot_spawn_routes.pending.contains(&route_key)
+                && let Ok(job) = self.lane_route_job(index, slot.then_some(home_position), goal)
+            {
+                let gates = self.bot_registry.spawn_route_gates;
+                if self.bot_spawn_routes.queue(route_key, gates, job).is_ok() {
+                    self.bot_registry.lane_revalidated_at.insert(key, now);
+                }
+            }
+            return cached;
+        }
         if self.bot_spawn_routes.pending.contains(&route_key) {
             return Err(SPAWN_ROUTE_PENDING);
         }
@@ -1018,6 +1049,9 @@ impl<W: Write> Engine<W> {
         self.bot_registry
             .lane_spawns
             .insert((index, objective, slot), result);
+        self.bot_registry
+            .stale_lane_spawns
+            .remove(&(index, objective, slot));
     }
 
     /// The world-side half of a lane qualification: the placements to try

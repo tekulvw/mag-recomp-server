@@ -38,6 +38,12 @@ pub struct HeadlessSimOptions {
     /// does: a tick that takes longer than 50 ms delays the next one instead
     /// of the world pausing for it (`MAG_SIM_CLOCK=wall`).
     pub wall_clock: bool,
+    /// With the wall clock, also sleep out the rest of each tick's 50 ms
+    /// slots, as the live scheduler waits for the next tick
+    /// (`MAG_SIM_CLOCK=realtime`). Off-tick workers then get the idle time
+    /// between ticks they get live; `wall` runs ticks back to back and gives
+    /// them almost none once ticks take the navmesh first.
+    pub realtime: bool,
     /// With the wall clock: hold the world for `.0` ms once every `.1`
     /// simulated seconds, standing in for a slow tick, to measure how the
     /// world recovers from one (`MAG_SIM_STALL=900@30`).
@@ -56,6 +62,7 @@ impl HeadlessSimOptions {
             warmup_seconds: 0,
             structural_completions: Vec::new(),
             wall_clock: false,
+            realtime: false,
             stall: None,
         }
     }
@@ -114,9 +121,10 @@ impl HeadlessSimOptions {
             }
             options.warmup_seconds = warmup;
         }
-        options.wall_clock = match lookup("MAG_SIM_CLOCK").as_deref() {
-            None | Some("virtual") => false,
-            Some("wall") => true,
+        (options.wall_clock, options.realtime) = match lookup("MAG_SIM_CLOCK").as_deref() {
+            None | Some("virtual") => (false, false),
+            Some("wall") => (true, false),
+            Some("realtime") => (true, true),
             Some(other) => return Err(format!("invalid MAG_SIM_CLOCK: {other:?}")),
         };
         if let Some(stall) = lookup("MAG_SIM_STALL") {
@@ -564,6 +572,7 @@ impl<W: Write> Engine<W> {
                     .map_err(|e| e.to_string())?;
             }
             let started = Instant::now();
+            let slot_started = started;
             let response = self.tick_world(now, wall, "headless-sim".into());
             let elapsed = started.elapsed();
             let timing = self.take_tick_timing().unwrap_or_default();
@@ -675,7 +684,12 @@ impl<W: Write> Engine<W> {
                             .map(|at| work_ms.saturating_sub(at) as f64),
                     );
                 }
-                WORLD_TICK_INTERVAL * slots as u32
+                let advance = WORLD_TICK_INTERVAL * slots as u32;
+                if options.realtime {
+                    // Off-tick workers run while the world waits for its next tick.
+                    std::thread::sleep(advance.saturating_sub(slot_started.elapsed()));
+                }
+                advance
             } else {
                 WORLD_TICK_INTERVAL
             };

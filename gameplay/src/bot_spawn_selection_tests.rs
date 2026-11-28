@@ -1383,6 +1383,62 @@ fn structure_gate_changes_route_again_without_probing_placements_again() {
     assert_eq!(engine.bot_registry.spawn_candidates.probes, probed);
 }
 
+#[test]
+fn defender_lane_answers_survive_gate_changes_and_revalidate_at_most_every_15_s() {
+    let mut engine = engine_with_defence();
+    engine.bot_spawn_routes.inline = false;
+    engine.bot_spawn_routes.blocking = true;
+    for t in [0, 50] {
+        engine
+            .prefetch_bot_spawn_routes(Duration::from_millis(t), 1)
+            .unwrap();
+    }
+    engine.wait_bot_spawn_routes(1).unwrap();
+    choose_defender(&mut engine, 200, &Default::default());
+    let answers = engine.bot_registry.lane_spawns.len();
+    assert!(answers > 0);
+    let lanes_pending = |engine: &Engine<Vec<u8>>| {
+        engine
+            .bot_spawn_routes
+            .pending
+            .iter()
+            .filter(|key| matches!(key, SpawnRouteKey::Lane(..)))
+            .count()
+    };
+
+    // A gate change keeps every answer, usable or not, in use and queues
+    // each one once.
+    change_structure_gates(&mut engine, 1);
+    engine
+        .prefetch_bot_spawn_routes(Duration::from_secs(2), 1)
+        .unwrap();
+    assert_eq!(engine.bot_registry.lane_spawns.len(), answers);
+    assert_eq!(engine.bot_registry.stale_lane_spawns.len(), answers);
+    let queued = lanes_pending(&engine);
+    assert!(queued > 0);
+    let (spawn, _) = choose_defender(&mut engine, 200, &Default::default());
+    assert!(
+        [Some(NORTH), Some(SOUTH)].contains(&spawn.spawn_point),
+        "the earlier answers are in use: {spawn:?}"
+    );
+    engine.wait_bot_spawn_routes(1).unwrap();
+    choose_defender(&mut engine, 200, &Default::default());
+
+    // Another change within 15 s routes nothing again; after it, it does.
+    change_structure_gates(&mut engine, 2);
+    engine
+        .prefetch_bot_spawn_routes(Duration::from_secs(5), 1)
+        .unwrap();
+    assert!(!engine.bot_registry.stale_lane_spawns.is_empty());
+    assert_eq!(lanes_pending(&engine), 0);
+    let (spawn, _) = choose_defender(&mut engine, 200, &Default::default());
+    assert!([Some(NORTH), Some(SOUTH)].contains(&spawn.spawn_point));
+    engine
+        .prefetch_bot_spawn_routes(Duration::from_secs(17), 1)
+        .unwrap();
+    assert!(lanes_pending(&engine) > 0);
+}
+
 /// The live case: an attacking squad's open parachute drop zone was routed
 /// only when a life asked for it at the wave. The answer was still pending
 /// then, so the life fell back to its population slot, and every structure

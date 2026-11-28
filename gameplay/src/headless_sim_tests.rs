@@ -157,9 +157,13 @@ fn options_default_to_one_observer_and_read_every_setting() {
             warmup_seconds: 120,
             structural_completions: vec![(24, 60), (27, 90)],
             wall_clock: true,
+            realtime: false,
             stall: Some((900, 30)),
         }
     );
+    let realtime =
+        HeadlessSimOptions::from_lookup(900, lookup(&[("MAG_SIM_CLOCK", "realtime")])).unwrap();
+    assert!(realtime.wall_clock && realtime.realtime);
 }
 
 #[test]

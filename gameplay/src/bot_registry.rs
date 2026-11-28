@@ -175,6 +175,13 @@ pub(crate) struct BotRegistry {
     pub(super) stale_spawn_qualification: BTreeSet<(u16, u16)>,
     /// When each stale qualification's revalidation was last queued.
     pub(super) spawn_revalidated_at: BTreeMap<(u16, u16), Duration>,
+    /// Lane qualifications below routed through earlier structure gates, and
+    /// when each one's revalidation was last queued, as for points.
+    pub(super) stale_lane_spawns: BTreeSet<(u16, u16, bool)>,
+    pub(super) lane_revalidated_at: BTreeMap<(u16, u16, bool), Duration>,
+    /// The time of the latest spawn-route prefetch pass, for revalidations a
+    /// spawn choice queues.
+    pub(super) spawn_route_clock: Duration,
     /// Grounded placements per spawn point before routing, for the collision
     /// world they were probed in. Structure gate changes leave them alone:
     /// they depend only on static collision and authored hospital exits.
@@ -3929,6 +3936,8 @@ impl<W: Write> Engine<W> {
         self.bot_registry.spawn_qualification.clear();
         self.bot_registry.stale_spawn_qualification.clear();
         self.bot_registry.spawn_revalidated_at.clear();
+        self.bot_registry.stale_lane_spawns.clear();
+        self.bot_registry.lane_revalidated_at.clear();
         self.bot_registry.lane_spawns.clear();
         self.bot_registry.spawn_route_gates = None;
         self.bot_registry.spawn_candidates = Default::default();
