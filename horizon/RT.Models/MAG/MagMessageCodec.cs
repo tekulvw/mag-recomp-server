@@ -20,11 +20,24 @@ namespace RT.Models.MAG
         public static bool TryParseClient(byte[] payload, out MagMessage message) =>
             TryParseClientForApplication(payload, 20230, out message);
 
-        public static bool TryParseClientForApplication(byte[] payload, int applicationId, out MagMessage message)
+        public static bool TryParseClientForApplication(byte[] payload, int applicationId, out MagMessage message) =>
+            TryParseClientCore(payload, applicationId, false, out message);
+
+        public static bool TryParseClientForProtocol(byte[] payload, int applicationId, uint protocol, out MagMessage message)
         {
-            if (TryParseForApplication(payload, applicationId, out message) && (message is MagRetailPartyInvite || message is MagRetailPartyInviteResponse ||
+            message = null;
+            if (!ValidProfile(applicationId, protocol)) return false;
+            return TryParseClientCore(payload, applicationId, protocol == 1793, out message);
+        }
+
+        private static bool ValidProfile(int applicationId, uint protocol) =>
+            (applicationId == 20230 && protocol == 1725) || (applicationId == 20231 && (protocol == 1740 || protocol == 1793));
+
+        private static bool TryParseClientCore(byte[] payload, int applicationId, bool retail212, out MagMessage message)
+        {
+            if (TryParseCore(payload, applicationId, retail212, out message) && (message is MagRetailPartyInvite || message is MagRetailPartyInviteResponse ||
                 message is MagRetailPartyLeave || message is MagRetailPartyOpenInvite || message is MagRetailPartyRejoinRequest || message is MagRetailCancelJoinRequest || message is MagTrainingCompletedRequest || message is MagKeepAlive || message is MagJoinGameRequest || message is MagServerStatusRequest || message is MagHello || message is MagProtocolInfo || message is MagAccountLoginRequest || message is MagCharacterDataRequest ||
-                message is MagNpAuthenticateRequest || message is MagUniverseListRequest || message is MagRetailPatchRequest || message is MagRetailAccountLogoutRequest ||
+                message is MagNpAuthenticateRequest || message is MagUniverseListRequest || message is MagRetailPatchRequest || message is MagPatch212Request || message is MagRetailAccountLogoutRequest ||
                 message is MagNewsEulaRequest || message is MagCharacterListRequest || message is MagCreateCharacterRequest || message is MagDeleteCharacterRequest || message is MagLoadoutUpdateRequest || message is MagRetailLoadoutDeleteRequest || message is MagPurchaseSkillRequest || message is MagRetailSkillRespecRequest || message is MagRetailNominationsUpdate ||
                 message is MagRetailPlayerOnlineRequest || message is MagRetailPlayerGameInfoRequest)) return true;
             message = null;
@@ -34,7 +47,17 @@ namespace RT.Models.MAG
         public static bool TryParse(byte[] payload, out MagMessage message) =>
             TryParseForApplication(payload, 20230, out message);
 
-        public static bool TryParseForApplication(byte[] payload, int applicationId, out MagMessage message)
+        public static bool TryParseForApplication(byte[] payload, int applicationId, out MagMessage message) =>
+            TryParseCore(payload, applicationId, false, out message);
+
+        public static bool TryParseForProtocol(byte[] payload, int applicationId, uint protocol, out MagMessage message)
+        {
+            message = null;
+            if (!ValidProfile(applicationId, protocol)) return false;
+            return TryParseCore(payload, applicationId, protocol == 1793, out message);
+        }
+
+        private static bool TryParseCore(byte[] payload, int applicationId, bool retail212, out MagMessage message)
         {
             message = null;
             if (applicationId != 20230 && applicationId != 20231) return false;
@@ -44,6 +67,15 @@ namespace RT.Models.MAG
                 int itemBits = LoadoutItemBits(applicationId);
                 var reader = new MagBitReader(payload);
                 ushort messageType = reader.ReadUInt16();
+                if (retail212)
+                {
+                    if (!Mag212WireIds.TryDecode(messageType, out messageType)) return false;
+                    if (messageType == 0x01f5)
+                    {
+                        if (!MagPatch212Codec.TryParseRequest(payload, out var patch212)) return false;
+                        message = patch212; return true;
+                    }
+                }
                 // Retail0030/0031 are account logout, not prototype NP auth. Never fall back for conflicting IDs.
                 MagMessage parsed = applicationId == 20231 && ((messageType >= 0x0011 && messageType <= 0x0015) || (messageType >= 0x001a && messageType <= 0x0027) || (messageType >= 0x002b && messageType <= 0x0038) || messageType == 0x01f5 || messageType == 0x01f6)
                     ? messageType switch
@@ -127,13 +159,13 @@ namespace RT.Models.MAG
                         purchase.SkillId = unchecked((sbyte)reader.ReadByte());
                         break;
                     case MagPurchaseSkillResponse purchase:
-                        purchase.Success = reader.ReadBoolean(); purchase.Record = ReadRecord(reader, itemBits, applicationId == 20231);
+                        purchase.Success = reader.ReadBoolean(); purchase.Record = ReadRecord(reader, itemBits, applicationId == 20231, retail212);
                         break;
                     case MagRetailSkillRespecRequest _:
                         break;
                     case MagRetailSkillRespecResponse respec:
                         respec.Success = reader.ReadBoolean();
-                        respec.Record = respec.Success ? ReadRecord(reader, itemBits, true) : new MagCharacterRecord();
+                        respec.Record = respec.Success ? ReadRecord(reader, itemBits, true, retail212) : new MagCharacterRecord();
                         break;
                     case MagLoadoutUpdateRequest update:
                         update.LoadoutIndex = reader.ReadByte();
@@ -290,10 +322,10 @@ namespace RT.Models.MAG
                         content.Content = reader.ReadString(); content.Timestamp = reader.ReadUInt32();
                         break;
                     case MagCharacterRecordNotification notification:
-                        notification.Record = ReadRecord(reader, itemBits, applicationId == 20231);
+                        notification.Record = ReadRecord(reader, itemBits, applicationId == 20231, retail212);
                         break;
                     case MagCharacterDataResponse data:
-                        data.Success = reader.ReadBoolean(); data.RequestId = reader.ReadByte(); data.Record = ReadRecord(reader, itemBits, applicationId == 20231);
+                        data.Success = reader.ReadBoolean(); data.RequestId = reader.ReadByte(); data.Record = ReadRecord(reader, itemBits, applicationId == 20231, retail212);
                         break;
                     case MagCharacterDataRequest data:
                         data.QueryKind = reader.ReadByte();
@@ -306,6 +338,7 @@ namespace RT.Models.MAG
                         create.AccountName = reader.ReadCString(); create.Faction = reader.ReadByte();
                         create.HeadId = reader.ReadByte(); create.VoiceId = reader.ReadByte();
                         create.UniverseId = reader.ReadUInt32(); create.NpId = reader.ReadBytes(36);
+                        if (retail212) create.Patch212UnknownB0 = reader.ReadBoolean();
                         break;
                     case MagCreateCharacterResponse created:
                         created.Result = (MagNetResult)unchecked((int)reader.ReadUInt32());
@@ -317,9 +350,11 @@ namespace RT.Models.MAG
                         deleted.Success = reader.ReadBoolean();
                         break;
                     case MagCharacterListResponse characters:
-                        characters.Success = reader.ReadBoolean(); characters.AllowedCharacters = reader.ReadByte(); characters.CharacterCount = reader.ReadByte();
+                        characters.Success = reader.ReadBoolean();
+                        if (!retail212) characters.AllowedCharacters = reader.ReadByte();
+                        characters.CharacterCount = reader.ReadByte();
                         for (int i = 0; i < characters.CharacterCount; i++) characters.Characters.Add(
-                            characters is MagRetailCharacterListResponse ? ReadRetailCharacter(reader, itemBits) : ReadCharacter(reader, itemBits));
+                            characters is MagRetailCharacterListResponse ? ReadRetailCharacter(reader, itemBits, retail212) : ReadCharacter(reader, itemBits));
                         break;
                 }
                 if (!reader.HasOnlyZeroPadding()) return false;
@@ -336,10 +371,26 @@ namespace RT.Models.MAG
                 message is MagRetailPlayerOnlineRequest or MagRetailPlayerOnlineResponse or MagRetailPlayerGameInfoRequest or MagRetailPlayerGameInfoResponse ||
                 message is MagRetailSkillRespecRequest or MagRetailSkillRespecResponse ? 20231 : 20230);
 
-        public static byte[] SerializeForApplication(MagMessage message, int applicationId)
+        public static byte[] SerializeForApplication(MagMessage message, int applicationId) =>
+            SerializeCore(message, applicationId, false);
+
+        public static byte[] SerializeForProtocol(MagMessage message, int applicationId, uint protocol)
+        {
+            if (!ValidProfile(applicationId, protocol)) throw new ArgumentException("Unsupported MAG application/protocol pair.");
+            return SerializeCore(message, applicationId, protocol == 1793);
+        }
+
+        private static byte[] SerializeCore(MagMessage message, int applicationId, bool retail212)
         {
             if (message == null) throw new ArgumentNullException(nameof(message));
             int itemBits = LoadoutItemBits(applicationId);
+            if (retail212 && (message is MagRetailPatchRequest ||
+                (message is MagNpAuthenticateRequest && message is not MagRetailNpAuthenticateRequest) ||
+                (message is MagNpAuthenticateResponse && message is not MagRetailNpAuthenticateResponse) ||
+                (message is MagMapsHelloResponse && message is not MagRetailMapsHelloResponse) ||
+                (message is MagUniverseListRequest && message is not MagRetailUniverseListRequest) ||
+                (message is MagUniverseListResponse && message is not MagRetailUniverseListResponse)))
+                throw new ArgumentException("Legacy message class conflicts with the selected1793 profile.", nameof(message));
             if (message is MagCharacterListResponse && (message is MagRetailCharacterListResponse) != (applicationId == 20231))
                 throw new ArgumentException("Character summary type conflicts with selected application.", nameof(message));
             if ((message is MagAccountLoginRequest && (message is MagRetailAccountLoginRequest) != (applicationId == 20231)) ||
@@ -363,7 +414,7 @@ namespace RT.Models.MAG
             if (message is (MagRetailPlayerOnlineRequest or MagRetailPlayerOnlineResponse or MagRetailPlayerGameInfoRequest or MagRetailPlayerGameInfoResponse) && applicationId != 20231)
                 throw new ArgumentException("Player status messages are retail-only.", nameof(message));
             var writer = new MagBitWriter();
-            writer.WriteUInt16(message.MessageType);
+            writer.WriteUInt16(retail212 ? Mag212WireIds.Encode(message.MessageType) : message.MessageType);
             if (message is MagPluginClientMessage common) WriteHeader(writer, common);
             switch (message)
             {
@@ -394,13 +445,13 @@ namespace RT.Models.MAG
                     writer.WriteByte(unchecked((byte)purchase.SkillId));
                     break;
                 case MagPurchaseSkillResponse purchase:
-                    writer.WriteBoolean(purchase.Success); WriteRecord(writer, purchase.Record, itemBits, applicationId == 20231);
+                    writer.WriteBoolean(purchase.Success); WriteRecord(writer, purchase.Record, itemBits, applicationId == 20231, retail212);
                     break;
                 case MagRetailSkillRespecRequest _:
                     break;
                 case MagRetailSkillRespecResponse respec:
                     writer.WriteBoolean(respec.Success);
-                    if (respec.Success) WriteRecord(writer, respec.Record, itemBits, true);
+                    if (respec.Success) WriteRecord(writer, respec.Record, itemBits, true, retail212);
                     break;
                 case MagLoadoutUpdateRequest update:
                     if (update.LoadoutIndex >= 5) throw new ArgumentException("Invalid loadout index.");
@@ -551,10 +602,10 @@ namespace RT.Models.MAG
                     writer.WriteString(content.Content); writer.WriteUInt32(content.Timestamp);
                     break;
                 case MagCharacterRecordNotification notification:
-                    WriteRecord(writer, notification.Record, itemBits, applicationId == 20231);
+                    WriteRecord(writer, notification.Record, itemBits, applicationId == 20231, retail212);
                     break;
                 case MagCharacterDataResponse data:
-                    writer.WriteBoolean(data.Success); writer.WriteByte(data.RequestId); WriteRecord(writer, data.Record, itemBits, applicationId == 20231);
+                    writer.WriteBoolean(data.Success); writer.WriteByte(data.RequestId); WriteRecord(writer, data.Record, itemBits, applicationId == 20231, retail212);
                     break;
                 case MagCharacterDataRequest data:
                     writer.WriteByte(data.QueryKind);
@@ -567,6 +618,7 @@ namespace RT.Models.MAG
                     if (create.NpId == null || create.NpId.Length != 36) throw new ArgumentException("NP identity must be 36 bytes.");
                     writer.WriteCString(create.AccountName); writer.WriteByte(create.Faction); writer.WriteByte(create.HeadId);
                     writer.WriteByte(create.VoiceId); writer.WriteUInt32(create.UniverseId); writer.WriteBytes(create.NpId);
+                    if (retail212) writer.WriteBoolean(create.Patch212UnknownB0);
                     break;
                 case MagCreateCharacterResponse created:
                     writer.WriteUInt32(unchecked((uint)(int)created.Result));
@@ -579,13 +631,15 @@ namespace RT.Models.MAG
                     break;
                 case MagCharacterListResponse characters:
                     if (characters.Characters == null || characters.CharacterCount != characters.Characters.Count) throw new ArgumentException("MAG character count mismatch.", nameof(message));
-                    writer.WriteBoolean(characters.Success); writer.WriteByte(characters.AllowedCharacters); writer.WriteByte(characters.CharacterCount);
+                    writer.WriteBoolean(characters.Success);
+                    if (!retail212) writer.WriteByte(characters.AllowedCharacters);
+                    writer.WriteByte(characters.CharacterCount);
                     foreach (var character in characters.Characters)
                     {
                         if (characters is MagRetailCharacterListResponse)
                         {
                             if (!(character is MagRetailCharacterSummary retailCharacter)) throw new ArgumentException("Retail character lists require retail summaries.", nameof(message));
-                            WriteRetailCharacter(writer, retailCharacter, itemBits);
+                            WriteRetailCharacter(writer, retailCharacter, itemBits, retail212);
                         }
                         else
                         {
@@ -624,7 +678,7 @@ namespace RT.Models.MAG
                 writer.WriteBoolean(item != -1); if (item != -1) writer.WriteBits((uint)item, itemBits);
             }
         }
-        private static MagCharacterRecord ReadRecord(MagBitReader reader, int itemBits, bool retail)
+        private static MagCharacterRecord ReadRecord(MagBitReader reader, int itemBits, bool retail, bool retail212)
         {
             var c = new MagCharacterRecord { Name = reader.ReadCString(), AccountId = reader.ReadUInt32(),
                 Faction = reader.ReadByte(), SkillSpecialty = reader.ReadByte(), Level = reader.ReadByte(), Experience = reader.ReadUInt32() };
@@ -638,9 +692,14 @@ namespace RT.Models.MAG
             c.RespecPoints = reader.ReadUInt32(); c.UniverseId = reader.ReadUInt32(); c.FactionHistory = reader.ReadByte();
             c.FactionRespec = reader.ReadBoolean(); c.LastUsedLoadout = reader.ReadByte(); c.NpId = reader.ReadBytes(36);
             if (retail) { c.VeteranLevel = reader.ReadByte(); c.Flags = reader.ReadByte(); }
+            if (retail212)
+            {
+                for (int i = 0; i < 6; i++) c.Patch212Unknown16[i] = reader.ReadUInt16();
+                for (int i = 0; i < 5; i++) c.Patch212Unknown32[i] = reader.ReadUInt32();
+            }
             return c;
         }
-        private static void WriteRecord(MagBitWriter writer, MagCharacterRecord c, int itemBits, bool retail)
+        private static void WriteRecord(MagBitWriter writer, MagCharacterRecord c, int itemBits, bool retail, bool retail212)
         {
             if (c == null || c.AvailableItems?.Length != 24 || c.Skills?.Length != 5 || c.Loadouts?.Length != 5 || c.NpId?.Length != 36)
                 throw new ArgumentException("MAG full record fixed-field width mismatch.");
@@ -655,6 +714,13 @@ namespace RT.Models.MAG
             writer.WriteUInt32(c.RespecPoints); writer.WriteUInt32(c.UniverseId); writer.WriteByte(c.FactionHistory);
             writer.WriteBoolean(c.FactionRespec); writer.WriteByte(c.LastUsedLoadout); writer.WriteBytes(c.NpId);
             if (retail) { writer.WriteByte(c.VeteranLevel); writer.WriteByte(c.Flags); }
+            if (retail212)
+            {
+                if (c.Patch212Unknown16?.Length != 6 || c.Patch212Unknown32?.Length != 5)
+                    throw new ArgumentException("1793 character record requires six 16-bit and five 32-bit extension fields.");
+                foreach (ushort value in c.Patch212Unknown16) writer.WriteUInt16(value);
+                foreach (uint value in c.Patch212Unknown32) writer.WriteUInt32(value);
+            }
         }
         private static MagCharacterSummary ReadCharacter(MagBitReader reader, int itemBits) => ReadCharacter(reader, new MagCharacterSummary(), itemBits);
         private static MagCharacterSummary ReadCharacter(MagBitReader reader, MagCharacterSummary c, int itemBits)
@@ -665,14 +731,17 @@ namespace RT.Models.MAG
             c.UniverseId = reader.ReadUInt32(); c.FactionHistory = reader.ReadByte(); c.RespecAvailable = reader.ReadBoolean();
             c.HeadId = reader.ReadByte(); c.VoiceId = reader.ReadByte(); return c;
         }
-        private static MagRetailCharacterSummary ReadRetailCharacter(MagBitReader reader, int itemBits)
+        private static MagRetailCharacterSummary ReadRetailCharacter(MagBitReader reader, int itemBits, bool retail212)
         {
             var c = new MagRetailCharacterSummary(); ReadCharacter(reader, c, itemBits);
-            c.VeteranLevel = reader.ReadByte(); return c;
+            c.VeteranLevel = reader.ReadByte();
+            if (retail212) { c.Patch212SlotLocked = reader.ReadBoolean(); c.Patch212SlotUnknown = reader.ReadBoolean(); }
+            return c;
         }
-        private static void WriteRetailCharacter(MagBitWriter writer, MagRetailCharacterSummary c, int itemBits)
+        private static void WriteRetailCharacter(MagBitWriter writer, MagRetailCharacterSummary c, int itemBits, bool retail212)
         {
             WriteCharacter(writer, c, itemBits); writer.WriteByte(c.VeteranLevel);
+            if (retail212) { writer.WriteBoolean(c.Patch212SlotLocked); writer.WriteBoolean(c.Patch212SlotUnknown); }
         }
         private static void WriteCharacter(MagBitWriter writer, MagCharacterSummary c, int itemBits)
         {

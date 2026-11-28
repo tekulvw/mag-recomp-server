@@ -4,8 +4,9 @@ using System.IO;
 
 namespace RT.Models.MAG
 {
-    public sealed class MagPatch212Request
+    public sealed class MagPatch212Request : MagMessage
     {
+        public override ushort MessageType => 0x01f5;
         public uint[] InstalledLevels { get; internal set; } = Array.Empty<uint>();
         public string BuildString { get; internal set; } = string.Empty;
         public string Language { get; internal set; } = string.Empty;

@@ -29,9 +29,21 @@ namespace Server.Medius
         public static bool IsClientPluginId(int applicationId, byte pluginId) =>
             pluginId == 0 || pluginId == MlsPluginId(applicationId);
 
-        public static RT_MSG_SERVER_PLUGIN_TO_APP ToMlsClient(MagMessage message, int applicationId)
+        // One server instance is configured for one wire protocol. Sessions pin
+        // it before their initial reply so a config reload cannot reinterpret IDs.
+        public static bool TryParseClient(byte[] payload, int applicationId, uint protocol, out MagMessage message) =>
+            protocol == 1793
+                ? MagMessageCodec.TryParseClientForProtocol(payload, applicationId, protocol, out message)
+                : MagMessageCodec.TryParseClientForApplication(payload, applicationId, out message);
+
+        public static RT_MSG_SERVER_PLUGIN_TO_APP ToClient(MagMessage message, int applicationId, uint protocol) =>
+            new RT_MSG_SERVER_PLUGIN_TO_APP {PluginId = 0, Payload = protocol == 1793
+                ? MagMessageCodec.SerializeForProtocol(message, applicationId, protocol)
+                : MagMessageCodec.SerializeForApplication(message, applicationId)};
+
+        public static RT_MSG_SERVER_PLUGIN_TO_APP ToMlsClient(MagMessage message, int applicationId, uint? protocol = null)
         {
-            var envelope = MagMessageCodec.ToPluginMessageForApplication(message, applicationId);
+            var envelope = ToClient(message, applicationId, protocol ?? Program.Settings.MagProtocolVersion);
             envelope.PluginId = MlsPluginId(applicationId);
             return envelope;
         }

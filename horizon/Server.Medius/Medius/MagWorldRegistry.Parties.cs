@@ -21,7 +21,7 @@ namespace Server.Medius
         public void RegisterPartySession(MagMlsSession session, Func<bool> connected, Action<MagMessage> send,
             Action<MagCharacterRecord> notify)
         {
-            if (_parties == null || session?.ApplicationId != 20231 || session.State != MagMlsSession.SessionState.Ready ||
+            if (_parties == null || session?.ApplicationId != 20231 || session.WireProtocolVersion == 1793 || session.State != MagMlsSession.SessionState.Ready ||
                 session.IsExpired(DateTime.UtcNow) || !connected()) return;
             lock (_gate)
             {

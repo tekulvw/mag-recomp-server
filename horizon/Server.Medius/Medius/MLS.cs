@@ -239,7 +239,7 @@ namespace Server.Medius
                         if (!Program.Settings.EnableMagAccountLogin || !MagPluginRouting.IsSelectedApplication(data.ApplicationId) || !data.MagMlsSession.IsBound)
                         { Logger.Warn("UNHANDLED MAG MLS plugin on unbound session."); break; }
                         if (Program.GameplayLobby != null && data.MagMlsSession.State == MagMlsSession.SessionState.Ready &&
-                            plugin.IsValid && MagPluginRouting.IsClientPluginId(data.ApplicationId, plugin.PluginId) && RT.Models.MAG.MagMessageCodec.TryParseClientForApplication(plugin.Payload, data.ApplicationId, out var gameplay))
+                            plugin.IsValid && MagPluginRouting.IsClientPluginId(data.ApplicationId, plugin.PluginId) && MagPluginRouting.TryParseClient(plugin.Payload, data.ApplicationId, data.MagMlsSession.WireProtocolVersion, out var gameplay))
                         {
                             if (gameplay is RT.Models.MAG.MagRetailPartyMessage party)
                             {
