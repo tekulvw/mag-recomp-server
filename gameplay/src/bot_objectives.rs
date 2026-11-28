@@ -476,7 +476,9 @@ pub(crate) fn operator_action<'a>(
     {
         let kind = match (team == r.owner_team, state) {
             (false, Deactivated | Activating | Retaken | CancelRetaken) => Activate,
-            (true, Activated | Deactivating | Completed | Retaking) if r.can_deactivate => {
+            (true, Activated | Deactivating) if r.can_deactivate => Deactivate,
+            // A permanent completion cannot be retaken.
+            (true, Completed | Retaking) if r.can_deactivate && !r.permanent_completion => {
                 Deactivate
             }
             _ => return None,

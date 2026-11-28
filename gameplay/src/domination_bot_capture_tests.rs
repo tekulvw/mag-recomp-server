@@ -173,6 +173,28 @@ fn an_owning_operator_retakes_a_secured_point() {
 }
 
 #[test]
+fn an_owning_operator_leaves_a_permanent_completion_destroyed() {
+    let (mut engine, bot) = capture_fixture(ObjectiveState::Completed);
+    let mut catalog = engine.objective_catalog.clone().unwrap();
+    let token = catalog
+        .bound_objects()
+        .find(|&(_, index)| index == 1)
+        .unwrap()
+        .0;
+    assert_eq!(catalog.mark_permanent_completions([token]), Ok(vec![1]));
+    engine.objective_world = Some(ObjectiveWorld::new(&catalog));
+    engine.objective_catalog = Some(catalog);
+    engine.bot_registry.bots.get_mut(&bot).unwrap().target.squad =
+        crate::replication::SquadAddress::from_index(16).unwrap();
+    interact(&mut engine, 1000);
+    assert!(actions(&engine).is_empty(), "no retake is attempted");
+    assert_eq!(
+        engine.objective_world.as_ref().unwrap().state(1),
+        Some(ObjectiveState::Completed)
+    );
+}
+
+#[test]
 fn an_operator_waiting_after_a_refusal_does_not_ask_again_early() {
     let (mut engine, bot) = capture_fixture(ObjectiveState::Deactivated);
     engine

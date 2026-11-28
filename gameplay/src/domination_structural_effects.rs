@@ -488,6 +488,25 @@ impl Catalog {
         })
     }
 
+    /// Placed objectives whose authored definition plays a Completed sequence
+    /// but keeps it through every retake state (Retaking, Retaken and
+    /// CancelRetaken all author -2): the destroyed look has no way back, so the
+    /// completion is permanent. Points that author a retake sequence, and
+    /// definitions without a Completed sequence, are not listed.
+    pub(crate) fn permanent_completions(&self) -> impl Iterator<Item = u32> + '_ {
+        self.placements.iter().filter_map(|row| {
+            let indices = &self.definitions[&row.definition_token].state_sequence_indices;
+            let permanent = indices["Completed"] >= 0
+                && ["Retaking", "Retaken", "CancelRetaken"]
+                    .iter()
+                    .all(|state| indices[*state] == -2);
+            permanent.then(|| {
+                u32::from_str_radix(&row.objective_token[2..], 16)
+                    .expect("validated objective token")
+            })
+        })
+    }
+
     pub(crate) fn source_is(&self, map: &str, metadata: &str, archive: &str, clv: &str) -> bool {
         self.map == map
             && self.metadata_sha256 == metadata
@@ -735,11 +754,12 @@ fn hex(value: &str, len: usize) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use serde_json::{Value, json};
 
-    fn profile() -> Value {
+    /// One placed tower (objective 0x11) that plays a Completed sequence.
+    pub(crate) fn profile() -> Value {
         let creation = |event_index, object_token, collision_token| {
             json!({
                 "kind":"create_animated_object", "event_index":event_index,
@@ -794,6 +814,29 @@ mod tests {
         assert_eq!(grid.sample(1024., 1024.), Ok(60));
         assert!(grid.sample(f32::NAN, 0.).is_err());
         assert!(grid.sample(-1., 0.).is_err());
+    }
+
+    #[test]
+    fn permanent_completions_need_a_completed_sequence_and_no_retake_sequence() {
+        // A tower: Completed plays a sequence and every retake slot keeps it.
+        let catalog = Catalog::from_json(&profile().to_string()).unwrap();
+        assert_eq!(catalog.permanent_completions().collect::<Vec<_>>(), [0x11]);
+        // A capture point authors a Retaken sequence; one that authors a
+        // Retaking or CancelRetaken sequence is reversible as well.
+        for state in ["Retaking", "Retaken", "CancelRetaken"] {
+            let mut point = profile();
+            point["definitions"]["0x00000010"]["state_sequence_indices"][state] = json!(0);
+            let catalog = Catalog::from_json(&point.to_string()).unwrap();
+            assert_eq!(catalog.permanent_completions().count(), 0, "{state}");
+        }
+        // Without a Completed sequence (kept or cleared) nothing is destroyed.
+        for completed in [-2, -1] {
+            let mut proxy = profile();
+            proxy["definitions"]["0x00000010"]["state_sequence_indices"]["Completed"] =
+                json!(completed);
+            let catalog = Catalog::from_json(&proxy.to_string()).unwrap();
+            assert_eq!(catalog.permanent_completions().count(), 0);
+        }
     }
 
     #[test]

@@ -548,6 +548,22 @@ impl ObjectiveWorld {
         ) {
             return Err("native_objective_transition_pending");
         }
+        // A permanent completion has no retake path: a script request to
+        // reopen it (Inactive or Deactivated, which enter Retaking) leaves it
+        // Completed. Locking it remains available.
+        if mode.class == NativeClass::SecureHold
+            && object.state.state_actor.state == ObjectiveState::Completed
+            && matches!(
+                target,
+                ObjectiveState::Inactive | ObjectiveState::Deactivated
+            )
+            && object
+                .rule
+                .as_ref()
+                .is_some_and(|rule| rule.permanent_completion)
+        {
+            return Ok(());
+        }
         if target != ObjectiveState::Completed
             || !matches!(mode.pending, Some(NativePending::Precision(_)))
         {
@@ -1596,6 +1612,7 @@ fn secure_hold(initial: ObjectiveState, rule: &ObjectiveInteractionRule) -> secu
             owner_team: rule.owner_team,
             trigger_count: rule.trigger_count,
             can_deactivate: rule.can_deactivate,
+            can_retake: !rule.permanent_completion,
             activate_ms: rule.activate_ms,
             complete_ms: rule.complete_ms,
             deactivate_ms: rule.deactivate_ms,
@@ -2765,6 +2782,71 @@ pub(crate) mod trigger_box_tests {
         let completed = frame(&mut world, 10, 162, &enemy).unwrap();
         assert_eq!(completed.state_actor.state, Completed);
         assert_eq!(completed.health_percent, 0);
+    }
+
+    #[test]
+    fn permanent_secure_completion_survives_owner_and_script_reopening() {
+        use ObjectiveInteractionKind::Deactivate;
+        use ObjectiveState::{Completed, Deactivated, Inactive, Locked};
+        let mut catalog = ObjectiveCatalog::from_json(&native_catalog().to_string()).unwrap();
+        assert_eq!(
+            catalog.mark_permanent_completions([0x0a, 0x0b]),
+            Ok(vec![10])
+        );
+        assert_eq!(catalog.permanent_completions(), vec![10]);
+        assert_eq!(
+            catalog.mark_permanent_completions([0x0c]),
+            Err("unbound_permanent_completion_objective")
+        );
+        let mut world = ObjectiveWorld::new(&catalog);
+        world.stage_native_state(10, Completed, None).unwrap();
+        for ms in [100, 101, 102] {
+            frame(&mut world, 10, ms, &BTreeMap::new());
+        }
+        assert_eq!(world.state(10), Some(Completed));
+
+        let actor = ObjectiveActor {
+            player: 8,
+            team: 1,
+            generation: 1,
+            position: CharacterPosition {
+                x: 100.,
+                y: 2.5,
+                z: 100.,
+            },
+        };
+        let outcome = world.interact(
+            ObjectiveInteraction {
+                target_object_id: 0x0c80_000a,
+                kind: Deactivate,
+                actor_index: 8,
+                trigger_index: 0,
+            },
+            actor,
+            Duration::from_millis(110),
+        );
+        assert!(!outcome.accepted);
+        assert_eq!(
+            frame(&mut world, 10, 120, &BTreeMap::from([(8, actor)])),
+            None
+        );
+        assert_eq!(world.state(10), Some(Completed));
+
+        // Script requests to reopen it change nothing; locking still works.
+        for target in [Deactivated, Inactive] {
+            world.stage_native_state(10, target, None).unwrap();
+            assert!(!world.has_script_transition(10));
+            assert_eq!(frame(&mut world, 10, 130, &BTreeMap::new()), None);
+            assert_eq!(world.state(10), Some(Completed));
+        }
+        world.stage_native_state(10, Locked, None).unwrap();
+        assert_eq!(
+            frame(&mut world, 10, 140, &BTreeMap::new())
+                .unwrap()
+                .state_actor
+                .state,
+            Locked
+        );
     }
 
     #[test]
