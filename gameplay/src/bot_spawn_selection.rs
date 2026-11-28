@@ -141,6 +141,9 @@ fn point(p: replication::CharacterPosition) -> [f64; 3] {
 /// life and neither cached nor reported.
 pub(crate) const SPAWN_ROUTE_PENDING: &str = "bot_spawn_route_pending";
 const SPAWN_ROUTE_PREFETCH_INTERVAL: Duration = Duration::from_secs(1);
+/// How often a point qualification from earlier structure gates is routed
+/// again (`refresh_spawn_route_caches`).
+const POINT_REVALIDATE_INTERVAL: Duration = Duration::from_secs(15);
 /// Spawn points whose placements one prefetch pass may probe. Probing a point
 /// costs a few milliseconds (a parachute point's drop line searches 400 m
 /// down per jumper), so a pass that meets more uncached points stops there and
@@ -705,13 +708,24 @@ impl<W: Write> Engine<W> {
 
     /// Cached spawn routes hold only for the structure gates they were
     /// planned through: a destroyed or repaired structure opens or seals ways.
+    /// Lane routes are routed again. A point qualification (does the slot
+    /// reach the point at all) stays in use, marked stale, until the prefetch
+    /// revalidates it, at most once per `POINT_REVALIDATE_INTERVAL`: gates
+    /// change between almost every wave of a Domination match, and routing
+    /// every point again after each change kept the shared navmesh busy.
+    /// With inline routing (synthetic tests) they are routed again at once.
     fn refresh_spawn_route_caches(&mut self) {
         let gates = self
             .navmesh_world
             .as_ref()
             .and_then(|mesh| mesh.structure_gate_key());
         if self.bot_registry.spawn_route_gates != gates {
-            self.bot_registry.spawn_qualification.clear();
+            if self.bot_spawn_routes.inline {
+                self.bot_registry.spawn_qualification.clear();
+            } else {
+                let keys = self.bot_registry.spawn_qualification.keys().copied();
+                self.bot_registry.stale_spawn_qualification.extend(keys);
+            }
             self.bot_registry.lane_spawns.clear();
             self.bot_registry.spawn_route_gates = gates;
             self.bot_spawn_routes.forget();
@@ -883,10 +897,14 @@ impl<W: Write> Engine<W> {
                         break;
                     }
                     let route_key = SpawnRouteKey::Point(index, home);
-                    if self
-                        .bot_registry
-                        .spawn_qualification
-                        .contains_key(&(index, home))
+                    let key = (index, home);
+                    let revalidate = self.bot_registry.stale_spawn_qualification.contains(&key)
+                        && self
+                            .bot_registry
+                            .spawn_revalidated_at
+                            .get(&key)
+                            .is_none_or(|&queued| now >= queued + POINT_REVALIDATE_INTERVAL);
+                    if (self.bot_registry.spawn_qualification.contains_key(&key) && !revalidate)
                         || self.bot_spawn_routes.pending.contains(&route_key)
                     {
                         continue;
@@ -904,6 +922,9 @@ impl<W: Write> Engine<W> {
                         let gates = self.bot_registry.spawn_route_gates;
                         if self.bot_spawn_routes.queue(route_key, gates, job).is_err() {
                             return Ok(());
+                        }
+                        if revalidate {
+                            self.bot_registry.spawn_revalidated_at.insert(key, now);
                         }
                     }
                 }
@@ -1131,6 +1152,9 @@ impl<W: Write> Engine<W> {
         self.bot_registry
             .spawn_qualification
             .insert((index, home), result);
+        self.bot_registry
+            .stale_spawn_qualification
+            .remove(&(index, home));
     }
 
     /// Grounded, collision-covered placements for a point before routing:

@@ -1186,8 +1186,17 @@ fn an_open_drop_zone_is_routed_before_the_wave_so_attacker_lives_land_there() {
     );
 }
 
+fn change_structure_gates(engine: &mut Engine<Vec<u8>>, revision: u32) {
+    let structures = std::sync::Arc::new(crate::bot_structure_collision::StructureObstacles::new(
+        &crate::domination_structural_world::SequenceCollisionState::default(),
+        revision,
+    ));
+    let mesh = engine.navmesh_world.clone().unwrap();
+    crate::navmesh_structure_gates::install_now(&mesh, Some(&structures)).unwrap();
+}
+
 #[test]
-fn a_structure_gate_change_routes_the_drop_zone_again_before_the_next_wave() {
+fn a_structure_gate_change_keeps_the_drop_zone_and_revalidates_it_at_most_every_15_s() {
     let actors = crate::actor_collision::ActorGrid::default();
     let mut engine = engine();
     activate_forward(&mut engine);
@@ -1204,28 +1213,51 @@ fn a_structure_gate_change_routes_the_drop_zone_again_before_the_next_wave() {
         .prefetch_bot_spawn_routes(Duration::from_secs(1), 1)
         .unwrap();
     assert!(engine.bot_spawn_routes.pending.is_empty());
-    let structures = std::sync::Arc::new(crate::bot_structure_collision::StructureObstacles::new(
-        &crate::domination_structural_world::SequenceCollisionState::default(),
-        1,
-    ));
-    let mesh = engine.navmesh_world.clone().unwrap();
-    crate::navmesh_structure_gates::install_now(&mesh, Some(&structures)).unwrap();
+    let key = SpawnRouteKey::Point(DROP, HOME);
+
+    // A gate change queues one revalidation; lives keep the drop zone
+    // meanwhile instead of falling back to their slot.
+    change_structure_gates(&mut engine, 1);
     let probed = engine.bot_registry.spawn_candidates.probes;
     engine
         .prefetch_bot_spawn_routes(Duration::from_secs(2), 1)
         .unwrap();
+    assert!(engine.bot_spawn_routes.pending.contains(&key));
+    assert_eq!(engine.bot_registry.spawn_candidates.probes, probed);
+    let (choice, receipts) = choose(&mut engine, &actors);
+    assert_eq!(spawned(choice).spawn_point, Some(DROP));
+    assert!(receipts.is_empty(), "the earlier qualification is in use");
+    engine.wait_bot_spawn_routes(1).unwrap();
+    let (choice, receipts) = choose(&mut engine, &actors);
+    assert_eq!(spawned(choice).spawn_point, Some(DROP));
+    assert!(
+        receipts
+            .iter()
+            .any(|r| r["op"] == "bot_spawn_point_qualified"),
+        "the revalidation is stored"
+    );
+    assert!(engine.bot_registry.stale_spawn_qualification.is_empty());
+
+    // Another change within 15 s of that revalidation routes nothing.
+    change_structure_gates(&mut engine, 2);
+    engine
+        .prefetch_bot_spawn_routes(Duration::from_secs(5), 1)
+        .unwrap();
     assert!(
         engine
-            .bot_spawn_routes
-            .pending
-            .contains(&SpawnRouteKey::Point(DROP, HOME)),
-        "the cleared qualification is queued again"
+            .bot_registry
+            .stale_spawn_qualification
+            .contains(&(DROP, HOME)),
+        "the gates changed again"
     );
-    assert_eq!(engine.bot_registry.spawn_candidates.probes, probed);
-    engine.wait_bot_spawn_routes(1).unwrap();
+    assert!(engine.bot_spawn_routes.pending.is_empty());
     let spawn = spawned(choose(&mut engine, &actors).0);
     assert_eq!(spawn.spawn_point, Some(DROP), "{spawn:?}");
     assert_eq!(spawn.arrival, Arrival::ParachuteLanding);
+    engine
+        .prefetch_bot_spawn_routes(Duration::from_secs(17), 1)
+        .unwrap();
+    assert!(engine.bot_spawn_routes.pending.contains(&key));
 }
 
 #[test]
