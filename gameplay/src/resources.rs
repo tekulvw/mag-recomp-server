@@ -236,6 +236,7 @@ impl<W: Write> Engine<W> {
             leadership: None,
             active_abilities: None,
             squad_orders: None,
+            completed_squad_tags: Vec::new(),
             active_ability_damage_team: None,
             fall_damage_rules: None,
             incapacitation_rules: None,

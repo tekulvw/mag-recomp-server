@@ -25,7 +25,7 @@
 //!
 //! Selection is O(squads^2) distance comparisons per tick.
 use super::*;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 const OBJECTIVE_FAMILY: u32 = 0x0c80_0000;
 
@@ -163,6 +163,8 @@ pub(crate) struct Book {
     automatic: BTreeMap<u16, u32>,
     /// The objective each bot squad worked on at the last bot tick.
     pub(crate) current: BTreeMap<u16, Option<u16>>,
+    /// Squads that worked on their human leader's FRAGO at the last bot tick.
+    pub(crate) ordered: BTreeSet<u16>,
     /// The last tag the mode refused per squad, not asked for again.
     refused: BTreeMap<u16, u32>,
 }
@@ -188,6 +190,10 @@ impl Book {
     }
     pub(crate) fn refused(&self, squad: u16, tag: u32) -> bool {
         self.refused.get(&squad) == Some(&tag)
+    }
+    /// Whether the squad's manual tag is one this server set and still keeps.
+    pub(crate) fn server_tag(&self, squad: u16, manual: u32) -> bool {
+        self.automatic.get(&squad) == Some(&manual)
     }
 }
 
@@ -352,6 +358,11 @@ impl<W: Write> Engine<W> {
                 }
             }
         }
+        self.bot_registry.director.squad_orders.ordered = chosen
+            .iter()
+            .filter(|(_, choice)| matches!(choice, Some((_, Source::Order))))
+            .map(|(&squad, _)| squad)
+            .collect();
         let current: BTreeMap<u16, Option<u16>> = chosen
             .into_iter()
             .map(|(squad, choice)| (squad, choice.map(|(index, _)| index)))

@@ -285,11 +285,111 @@ impl<W: Write> Engine<W> {
             snapshot.waypoint.is_some_and(|waypoint| waypoint.active),
         ))
     }
+    /// A side's credited action took an objective to Deactivated, Repaired or
+    /// Completed: its squads' tags on that objective are cleared at the next
+    /// publication (docs/squad-manual-orders.md, "Completed tags").
+    pub(crate) fn note_completed_squad_tag(
+        &mut self,
+        entry: crate::objective_control::NativeEntry,
+    ) {
+        use replication::ObjectiveState::{Completed, Deactivated, Repaired};
+        if self.squad_orders.is_none()
+            || !matches!(
+                entry.delta.state_actor.state,
+                Deactivated | Repaired | Completed
+            )
+        {
+            return;
+        }
+        let team = entry.bot_plant.map(|origin| origin.team).or_else(|| {
+            let player = entry.reward_actor?;
+            let world = self
+                .active
+                .iter()
+                .chain(self.peers.values())
+                .find(|a| a.reservation.player == player)
+                .or_else(|| self.active.iter().chain(self.peers.values()).next())?
+                .reservation
+                .world;
+            self.current_objective_source_team(player, world)
+        });
+        if let Some(team) = team.filter(|t| *t <= 1) {
+            self.completed_squad_tags
+                .push((team, entry.delta.object_index));
+        }
+    }
+
+    /// Clear the tags noted by `note_completed_squad_tag`. A squad of the
+    /// side whose tag names the objective (family and slot) loses its manual
+    /// tag while the objective is still Deactivated, Repaired or Completed.
+    /// Tags the server keeps for bot squads move with their bots instead.
+    fn clear_completed_squad_tags(&mut self, now: Duration, wall: u64) -> Result<(), &'static str> {
+        use replication::ObjectiveState::{Completed, Deactivated, Repaired};
+        // Kept until the clear is recorded, so a failed record retries.
+        let mut noted = self.completed_squad_tags.clone();
+        noted.sort_unstable();
+        noted.dedup();
+        if noted.is_empty() || self.squad_orders.is_none() {
+            self.completed_squad_tags.clear();
+            return Ok(());
+        }
+        let mut cleared = Vec::new();
+        for (team, objective) in noted {
+            let state = self
+                .objective_world
+                .as_ref()
+                .and_then(|world| world.state(objective));
+            if !matches!(state, Some(Deactivated | Repaired | Completed)) {
+                continue;
+            }
+            let target = 0x0c00_0000 | u32::from(objective);
+            for squad in u16::from(team) * 16..u16::from(team) * 16 + 16 {
+                let Some((effective, manual)) = self.squad_order_tags(squad) else {
+                    continue;
+                };
+                if manual == u32::MAX
+                    || effective & 0xff00_ffff != target
+                    || self
+                        .bot_registry
+                        .director
+                        .squad_orders
+                        .server_tag(squad, manual)
+                {
+                    continue;
+                }
+                cleared.push((squad, objective, manual));
+            }
+        }
+        if cleared.is_empty() {
+            self.completed_squad_tags.clear();
+            return Ok(());
+        }
+        let mut candidate = self.squad_order_candidate()?;
+        let mut results = Vec::with_capacity(cleared.len());
+        for &(squad, _, _) in &cleared {
+            results.push(self.set_candidate_tag(&mut candidate, squad, u32::MAX));
+        }
+        self.record(
+            json!({"op":"squad_tags_cleared","timestamp_ms":now.as_millis() as u64,
+                "squads":cleared.iter().zip(&results).map(|(&(squad, objective, tag), result)| json!({
+                    "squad_index":squad,"objective":objective,"previous_tag":tag,
+                    "applied":result.is_ok(),"error":result.err(),
+                })).collect::<Vec<_>>()}),
+            wall,
+        )?;
+        self.completed_squad_tags.clear();
+        if results.iter().any(Result::is_ok) {
+            self.install_squad_order_candidate(candidate);
+        }
+        Ok(())
+    }
+
     pub(crate) fn queue_squad_orders(
         &mut self,
         now: Duration,
         wall: u64,
     ) -> Result<(), &'static str> {
+        self.clear_completed_squad_tags(now, wall)?;
         let Some(mut next) = self.squad_orders.clone() else {
             return Ok(());
         };
