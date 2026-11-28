@@ -326,6 +326,8 @@ pub(super) struct Director {
     pub(super) demolition: crate::bot_demolition::Book,
     pub(super) squad_orders: crate::bot_squad_orders::Book,
     pub(super) breach: crate::bot_breach::Book,
+    /// (medic, patient) pairs whose approach route failed, until when.
+    pub(super) medic_failures: BTreeMap<(u16, crate::bot_medic_approach::Patient), Duration>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct CandidateKey {
@@ -2821,8 +2823,11 @@ impl<W: Write> Engine<W> {
                 let mut choices = Vec::new();
                 for (&id, bot) in &self.bot_registry.bots {
                     let r = bot.target.runtime.unwrap();
+                    // A medic on its way to a downed teammate is not drafted
+                    // for an ordinary interaction; an armed duty releases it.
                     if target_of(id, bot.target.squad.squad_index()) != Some(index)
                         || !operator_safe(bot)
+                        || (bot.medic_approach.is_some() && !duties.contains_key(&id))
                     {
                         continue;
                     }
@@ -2872,15 +2877,43 @@ impl<W: Write> Engine<W> {
                 }
             }
         }
+        // Medics walk to downed teammates ahead of ordinary objective
+        // movement, but after every duty above (bot_medic_approach).
+        let approaching = {
+            let mut busy: std::collections::BTreeSet<u16> = duties
+                .keys()
+                .chain(repairs.keys())
+                .chain(demolitions.keys())
+                .chain(operators.values())
+                .copied()
+                .collect();
+            if let Some((catalog, world)) = self
+                .objective_catalog
+                .as_ref()
+                .zip(self.objective_world.as_ref())
+            {
+                busy.extend(
+                    catalog
+                        .objects
+                        .iter()
+                        .filter_map(|o| world.interaction_owner(o.object_index))
+                        .map(|(id, _, _)| id),
+                );
+            }
+            let timing = self.tick_timing_start();
+            let approaching = self.tick_bot_medic_approaches(now, &busy, &mut receipts)?;
+            self.tick_timing_end(crate::tick_timing::Phase::BotsMedics, timing);
+            approaching
+        };
         let mut covered = self.bot_cover.controlled_ids();
-        let mut preempted = Vec::new();
+        let mut preempted: Vec<u16> = approaching.intersection(&covered).copied().collect();
         for (&id, bot) in &mut self.bot_registry.bots {
             let r = bot.target.runtime.unwrap();
             if bot.health == 0 {
                 bot.task = Default::default();
                 continue;
             }
-            if bot.has_supply_action() {
+            if bot.has_supply_action() || approaching.contains(&id) {
                 continue;
             }
             let settled = operator_safe(bot);
@@ -3077,8 +3110,9 @@ impl<W: Write> Engine<W> {
             let mut fresh = Vec::new();
             let mut retry = Vec::new();
             for (&id, b) in &self.bot_registry.bots {
-                // Cover owns its bots' movement until it hands them back.
-                if covered.contains(&id) {
+                // Cover owns its bots' movement until it hands them back, and
+                // a medic approach owns its medic's.
+                if covered.contains(&id) || approaching.contains(&id) {
                     continue;
                 }
                 let supply_passage = b.supply_passage_seek();

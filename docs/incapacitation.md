@@ -214,8 +214,9 @@ or be targeted, and it does not join a respawn wave.
   itself: the restored field8 with the ordinary standing state. The bot keeps
   its life and position and resumes its AI from there. A second collapse in
   that life is a new kill.
-- **Bot revive:** a bot medic revives a downed bot teammate inside its
-  medkit's reach, as it revives a downed human (see
+- **Bot revive:** the nearest free bot medic within `medic_radius_m` walks
+  to a downed teammate, bot or human, and revives it with its medkit, as it
+  revives a downed human (see "Reaching downed teammates" in
   [bot-healing.md](bot-healing.md)).
 - **Bleed-out:** the world clock ends a downed bot life at the authored
   deadline. Bots never press Bleed out, so a bot also gives up when no medic

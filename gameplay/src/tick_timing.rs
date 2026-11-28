@@ -21,6 +21,8 @@ pub enum Phase {
     BotsDrops,
     /// Objective goals and route planning.
     BotsObjectives,
+    /// Medic approaches to downed teammates, inside `BotsObjectives`.
+    BotsMedics,
     /// Strategic player waves and team spawn-wave deadlines.
     Waves,
     Firearms,
@@ -37,10 +39,13 @@ pub enum Phase {
     Drain,
     /// Results cohorts after the match ends.
     Results,
+    /// Headless simulation only: waiting for the cover and spawn-route
+    /// workers, which run off the tick live. Not part of any other phase.
+    SimWorkerWait,
 }
 
 impl Phase {
-    pub const ALL: [Phase; 18] = [
+    pub const ALL: [Phase; 20] = [
         Phase::Peers,
         Phase::Incapacitation,
         Phase::Perception,
@@ -49,6 +54,7 @@ impl Phase {
         Phase::BotsPopulation,
         Phase::BotsDrops,
         Phase::BotsObjectives,
+        Phase::BotsMedics,
         Phase::Waves,
         Phase::Firearms,
         Phase::Healing,
@@ -59,6 +65,7 @@ impl Phase {
         Phase::Resupply,
         Phase::Drain,
         Phase::Results,
+        Phase::SimWorkerWait,
     ];
 
     pub fn name(self) -> &'static str {
@@ -71,6 +78,7 @@ impl Phase {
             Phase::BotsPopulation => "bots.population",
             Phase::BotsDrops => "bots.drops",
             Phase::BotsObjectives => "bots.objectives",
+            Phase::BotsMedics => "bots.objectives.medics",
             Phase::Waves => "waves",
             Phase::Firearms => "firearms",
             Phase::Healing => "healing",
@@ -81,6 +89,7 @@ impl Phase {
             Phase::Resupply => "resupply",
             Phase::Drain => "drain",
             Phase::Results => "results",
+            Phase::SimWorkerWait => "sim.worker_wait",
         }
     }
 

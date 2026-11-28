@@ -18,6 +18,9 @@ pub struct Policy {
     /// Health a bot revival restores, as a share of the reviver's maximum.
     /// Bots own no skills, so this stands in for the resuscitation modifier.
     pub revive_health_per_mille: u16,
+    /// With `revive`, the nearest free bot medic walks to a downed teammate
+    /// within the downed-bot medic radius (bot_medic_approach).
+    pub approach_downed: bool,
 }
 impl Default for Policy {
     fn default() -> Self {
@@ -28,6 +31,7 @@ impl Default for Policy {
             medic_role_slots: vec![1],
             revive: true,
             revive_health_per_mille: 250,
+            approach_downed: true,
         }
     }
 }

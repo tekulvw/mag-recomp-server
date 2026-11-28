@@ -38,6 +38,48 @@ sphere in the retail combat catalog (the medkit). Its sphere sits
 - **Cooldown:** one use starts the item's authored cooldown, and each patient
   is treated by at most one medic per tick. Enemies are never treated.
 
+### Reaching downed teammates
+
+When `approach_downed` and `revive` are on, every downed teammate, human or
+bot, that a medic can still revive gets one bot medic sent to it: the nearest
+free medic of its side within the downed-bot medic radius
+(`incapacitation.medic_radius_m`, 30 m, straight-line; see "Downed bots" in
+[incapacitation.md](incapacitation.md)). Free means alive, not downed,
+grounded and not on another job.
+
+- **Priority:** the medic leaves its ordinary objective movement and its
+  cover. It is never taken from a higher duty: an armed-objective, blast or
+  defuse duty, a repair or demolition duty, an objective interaction, a
+  supply action or a passage. When one of those comes up, it drops the
+  approach.
+- **One medic per patient:** a medic serves one patient, and a patient has
+  one medic. At most four new routes start per tick, nearest pairs first.
+- **Only walkable approaches:** a medic is sent only when it stands on the
+  patient's navmesh walking component and the planned route takes no
+  passage (it holds no permit, so it would stop there) and is at most twice
+  the radius long. Otherwise that medic is not sent to that patient again
+  during the patient's downed life.
+- **Walk and revive:** the medic walks the navmesh to the patient and stops
+  once the patient is well inside its medkit's sphere. The ordinary medkit
+  use above then revives the patient.
+- **Resuming:** the medic keeps its objective task through the approach and
+  resumes it afterwards, and a revived bot resumes the task it had when it
+  went down: both keep their destination and only plan the route there
+  again.
+- **Release:** the approach ends, and the medic returns to its objective,
+  when the patient is revived or bleeds out, when the medic dies or goes
+  down, when it takes a higher duty, or when it gets no closer for 6 s. After
+  that last case the same medic is not sent to the same patient again during
+  that downed life.
+
+The downed bot's own wait is unchanged: it still checks for a medic within
+30 m at 10 s and every second after, and a medic on its way counts.
+
+Receipts: `bot_medic_approach_started`, `bot_medic_approach_arrived`,
+`bot_medic_approach_ended` (with `reason`: `patient_revived`,
+`patient_lost`, `medic_down`, `higher_duty`, `supply_action`, `passage`,
+`no_progress` or `disabled`) and `bot_medic_approach_unroutable`.
+
 ### Revival
 
 A bot revival follows the human Resuscitate request. The patient's damage
@@ -60,7 +102,8 @@ The population file's `healing` object; omitted fields use the defaults:
   "teammates": true,
   "medic_role_slots": [1],
   "revive": true,
-  "revive_health_per_mille": 250
+  "revive_health_per_mille": 250,
+  "approach_downed": true
 }
 ```
 
@@ -87,8 +130,6 @@ no human teammates.
 
 ## Not implemented
 
-- Medics do not walk to injured or downed teammates. They treat whoever is
-  within reach of their sphere, typically squadmates sharing an objective
-  position. A downed bot near a bot medic waits for it (see "Downed bots" in
-  [incapacitation.md](incapacitation.md)), so it is revived only if the
-  medic's own task brings it into reach.
+- Medics do not walk to injured teammates. They treat whoever is within
+  reach of their sphere, typically squadmates sharing an objective position.
+  Only downed teammates bring a medic over (above).

@@ -339,7 +339,7 @@ fn objectives(can_deactivate: bool) -> ObjectiveCatalog {
 }
 
 /// A 120 m generated floor and navmesh with `slots` as (team, squad, x, z).
-fn engine(slots: &[(u8, u16, f32, f32)], can_deactivate: bool) -> Engine<Vec<u8>> {
+pub(crate) fn engine(slots: &[(u8, u16, f32, f32)], can_deactivate: bool) -> Engine<Vec<u8>> {
     engine_with(slots, objectives(can_deactivate))
 }
 
@@ -516,14 +516,14 @@ fn set_caps(engine: &mut Engine<Vec<u8>>, defenders: usize, attackers: usize) {
     p.attacker_cap = attackers;
 }
 
-fn plan_tick(engine: &mut Engine<Vec<u8>>, ms: u64) {
+pub(crate) fn plan_tick(engine: &mut Engine<Vec<u8>>, ms: u64) {
     let actors = engine.actor_grid(Duration::from_millis(ms)).unwrap();
     engine
         .tick_bot_objectives(Duration::from_millis(ms), 1, &actors)
         .unwrap();
 }
 
-fn bot_at(engine: &Engine<Vec<u8>>, x: f32, z: f32) -> u16 {
+pub(crate) fn bot_at(engine: &Engine<Vec<u8>>, x: f32, z: f32) -> u16 {
     *engine
         .bot_registry
         .bots
@@ -549,7 +549,7 @@ fn operators(engine: &Engine<Vec<u8>>) -> Vec<u16> {
         .collect()
 }
 
-fn records(engine: &Engine<Vec<u8>>, op: &str) -> Vec<Value> {
+pub(crate) fn records(engine: &Engine<Vec<u8>>, op: &str) -> Vec<Value> {
     engine
         .writer
         .split(|&b| b == b'\n')

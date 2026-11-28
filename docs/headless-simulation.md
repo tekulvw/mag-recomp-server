@@ -82,7 +82,10 @@ before `MAG_SIM_WARMUP_S` (default `0`) are left out of it.
   `ticks_over_25ms` and `ticks_over_50ms`.
 - `phase_ms`: the same statistics per subsystem. `bots.population`,
   `bots.drops` and `bots.objectives` (which includes route planning) are part
-  of `bots`. The engine records these only after `enable_tick_timing`, which
+  of `bots`; `bots.objectives.medics` (medic approaches) is part of
+  `bots.objectives`. `sim.worker_wait` is the simulation's own wait for the
+  cover and spawn-route workers, which run off the tick live: it is part of
+  `tick_ms` but of no other phase, so tick work is `tick_ms` minus it. The engine records these only after `enable_tick_timing`, which
   only the sim calls.
 - `event_drain_ms` and `event_drains_per_s`: cost and count of the simulated
   event-reply drains. They are not part of `tick_ms`.

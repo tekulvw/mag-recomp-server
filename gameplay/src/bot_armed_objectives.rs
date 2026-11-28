@@ -522,4 +522,4 @@ fn point(p: replication::CharacterPosition) -> [f64; 3] {
 
 #[cfg(test)]
 #[path = "bot_armed_objectives_tests.rs"]
-mod tests;
+pub(crate) mod tests;

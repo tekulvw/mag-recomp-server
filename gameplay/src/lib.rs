@@ -55,6 +55,7 @@ pub mod bot_firearms;
 pub mod bot_healing;
 pub mod bot_incapacitation;
 pub mod bot_kits;
+mod bot_medic_approach;
 pub mod bot_names;
 pub mod bot_navigation;
 mod bot_objectives;

@@ -238,6 +238,10 @@ pub(super) struct WorldBot {
     pub(super) downed: Option<crate::bot_incapacitation::BotDowned>,
     /// Revivals in this life; a later collapse is a new kill.
     pub(super) revivals: u32,
+    /// The downed teammate this medic is walking to, if any.
+    pub(super) medic_approach: Option<crate::bot_medic_approach::Approach>,
+    /// The objective task a downed life had, resumed when it is revived.
+    pub(super) task_before_down: Option<crate::bot_objectives::Task>,
     /// The spawn point this life started at, when it used one.
     pub(super) life_spawn: Option<u16>,
     pub(super) move_attempted: bool,
@@ -1414,6 +1418,7 @@ impl<W: Write> Engine<W> {
                     Some(next) => current.state = next,
                     None => {
                         bot.downed = None;
+                        bot.task_before_down = None;
                         runtime.since = now;
                         runtime.last_update = now;
                     }
@@ -1444,7 +1449,9 @@ impl<W: Write> Engine<W> {
                 runtime.since = now;
                 runtime.last_update = now;
                 runtime.physics_motion = None;
-                bot.task = Default::default();
+                // A downed life resumes this task if it is revived.
+                let task = std::mem::take(&mut bot.task);
+                bot.task_before_down = bot.downed.is_some().then_some(task);
                 bot.delay_episode = None;
                 bot.reconsider = None;
                 bot.reconsider_history.clear();
@@ -1904,6 +1911,8 @@ impl<W: Write> Engine<W> {
                 bot.received_healing = None;
                 bot.downed = None;
                 bot.revivals = 0;
+                bot.medic_approach = None;
+                bot.task_before_down = None;
                 bot.life_spawn = spawn.spawn_point;
                 bot.damage = initial_damage();
                 bot.move_attempted = false;
@@ -3824,6 +3833,8 @@ impl<W: Write> Engine<W> {
                     received_healing: None,
                     downed: None,
                     revivals: 0,
+                    medic_approach: None,
+                    task_before_down: None,
                     life_spawn: spawn.spawn_point,
                     move_attempted: false,
                     due_respawn_wave: None,
@@ -4399,6 +4410,10 @@ impl BotRegistry {
     /// The bots a recipient holds snapshots of, if it has been snapshotted.
     pub(crate) fn known_bots(&self, reservation_id: &str) -> Option<&BTreeSet<u16>> {
         self.known.get(reservation_id)
+    }
+    /// The population's fill total, for a test that adds a human.
+    pub(crate) fn set_total_for_test(&mut self, total: usize) {
+        self.total = total;
     }
     /// The bots a recipient holds snapshots of, for a test to set.
     pub(crate) fn known_for_test(&mut self, reservation_id: &str) -> &mut BTreeSet<u16> {

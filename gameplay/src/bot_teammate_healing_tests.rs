@@ -5,7 +5,7 @@ use crate::spawn_progression::ready;
 use std::sync::Arc;
 
 const FIRST_AID: u16 = 5;
-const MEDKIT: u16 = 6;
+pub(crate) const MEDKIT: u16 = 6;
 
 fn medic_items() -> item_catalog::ItemCatalog {
     let item = |id: u16, name: &str| {
@@ -32,6 +32,11 @@ fn medic_items() -> item_catalog::ItemCatalog {
         20231,
     )
     .unwrap();
+    items.with_retail_combat(medic_combat())
+}
+
+/// The generated combat catalog of [`medic_items`]: its two healing items.
+pub(crate) fn medic_combat() -> retail_combat::RetailCombatCatalog {
     let healing = |id: u16, name: &str, sphere: bool| {
         let mut row = json!({"authored_ref":format!("FactionItemList0:{id}"),"name":name,
             "definition":{"group":"active_items","name":name},"source":{},"item_source":{},
@@ -43,7 +48,7 @@ fn medic_items() -> item_catalog::ItemCatalog {
         }
         (id.to_string(), row)
     };
-    let combat = retail_combat::RetailCombatCatalog::from_json(&json!({
+    retail_combat::RetailCombatCatalog::from_json(&json!({
         "schema_version":3,"application_id":20231,"status":"synthetic",
         "authority":{"bullet_damage":true,"armor_reduction":true,"body_damage":true,
             "grenade_damage":true,"grenade_physics":false,"healing_schedule":true,"ammo_tokens":false},
@@ -55,8 +60,7 @@ fn medic_items() -> item_catalog::ItemCatalog {
             "multiplier":1.,"source":{}})).collect::<Vec<_>>(),
         "healing":serde_json::Map::from_iter([healing(FIRST_AID, "first_aid_pack", false), healing(MEDKIT, "medkit", true)]),
         "unsupported":{},"limitations":["Independent synthetic values; no game tuning"]
-    }).to_string()).unwrap();
-    items.with_retail_combat(combat)
+    }).to_string()).unwrap()
 }
 
 fn reserve(engine: &mut Engine<Vec<u8>>, player: u16) {
