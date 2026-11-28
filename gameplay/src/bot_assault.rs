@@ -18,9 +18,10 @@
 //!   The others reinforce the open point with the fewest squads (ties: lower
 //!   objective index). A point the defenders take back sends its
 //!   reinforcements home.
-//! - **Defences.** While a point's defences stand, `breach_reserve_squads`
-//!   of its attacking squads stay on the point instead of all of them
-//!   breaking the defences first (bot_breach).
+//! - **Defences.** While a point's defences stand, up to
+//!   `breach_reserve_squads` of its attacking squads stay on the point,
+//!   instead of all of them breaking the defences first (bot_breach). The
+//!   lane's last squad still breaks them.
 //! - **Waves.** A squad whose bots are all far from its open point gathers at
 //!   a rally place `rally_back_m` before it (towards the squad's home spawn)
 //!   until `rally_share` of its living bots are there, or `rally_wait_ms`
@@ -46,8 +47,8 @@ pub struct Policy {
     pub hold_radius_m: [f64; 2],
     /// Attacking squads that stay on a secured point while its stage is open.
     pub stage_hold_squads: u16,
-    /// Attacking squads of a point that stay on it while the others break its
-    /// defences (raises `breach.attacker_reserve_squads` in these matches).
+    /// Attacking squads of a point that stay on it while the others break
+    /// its defences; the lane's last squad still breaks them (bot_breach).
     pub breach_reserve_squads: u16,
     /// Distance of the rally place from the point; `0` turns rallies off.
     pub rally_back_m: f64,

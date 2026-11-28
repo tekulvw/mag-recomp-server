@@ -122,6 +122,7 @@ fn lane_plan(defences: &[u16]) -> Plan {
 const R: Reserves = Reserves {
     attackers: 0,
     defenders: 1,
+    point_attackers: 0,
 };
 
 fn squad(squad: u16, team: u8, objective: u16) -> SquadLane {
@@ -207,10 +208,26 @@ fn reach_bounds_a_lanes_defences_and_reserves_keep_squads_on_the_capture() {
     let reserves = Reserves {
         attackers: 1,
         defenders: 0,
+        point_attackers: 0,
     };
     let chosen = assign(&plan, &squads, |_| true, reserves);
     // Squad 1 holds the capture; the defenders face the one defence worked.
     assert_eq!(chosen, BTreeMap::from([(0, 30), (16, 30)]));
+    // The assault's point squads stay too, but never the lane's last squad.
+    let point = Reserves {
+        attackers: 0,
+        defenders: 0,
+        point_attackers: 1,
+    };
+    assert_eq!(
+        assign(&plan, &squads, |_| true, point),
+        BTreeMap::from([(0, 30), (16, 30)])
+    );
+    let alone = [squad(0, 0, 10), squad(16, 1, 10)];
+    assert_eq!(
+        assign(&plan, &alone, |_| true, point),
+        BTreeMap::from([(0, 30), (16, 30)])
+    );
 }
 
 #[test]

@@ -73,8 +73,9 @@ comes first.
 
 While a point's defences stand ([bot-breach-order.md](bot-breach-order.md)),
 `breach_reserve_squads` (default 1) of its attacking squads stay on the
-point and the others break the defences. This raises the breach policy's
-`attacker_reserve_squads` in these matches only. Before, every attacking
+point and the others break the defences. The lane's last squad still breaks
+them, so a point worked by one squad is unchanged. This adds to the breach
+policy's `attacker_reserve_squads`, in these matches only. Before, every attacking
 squad of a lane broke its defences first, for up to `give_up_ms` (5 min) per
 defence, and nobody contested the point meanwhile.
 
