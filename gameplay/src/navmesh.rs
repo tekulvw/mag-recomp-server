@@ -12,7 +12,15 @@ use mag_navmesh_sys::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{ffi::c_int, sync::Mutex, time::Instant};
+use std::{
+    cell::Cell,
+    ffi::c_int,
+    sync::{
+        Mutex, MutexGuard,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::{Duration, Instant},
+};
 #[path = "navmesh_drops.rs"]
 mod drops;
 pub use drops::{DropLink, WaypointKind};
@@ -26,6 +34,9 @@ pub use movement_profile::MovementProfile;
 #[cfg(test)]
 #[path = "navmesh_artifact_read_tests.rs"]
 mod artifact_read_tests;
+#[cfg(test)]
+#[path = "navmesh_foreground_tests.rs"]
+mod foreground_tests;
 #[cfg(test)]
 #[path = "navmesh_goal_tests.rs"]
 mod goal_tests;
@@ -607,6 +618,30 @@ pub struct NavMesh {
         Mutex<Option<std::sync::Arc<crate::bot_structure_collision::StructureObstacles>>>,
     /// The installed gates by polygon, with the structures each came from.
     structure_gate_cache: Mutex<std::sync::Arc<GateCache>>,
+    /// World ticks using the mesh now (see [`NavMesh::foreground`]).
+    foreground: AtomicUsize,
+}
+
+thread_local! {
+    /// Whether this thread runs a world tick that holds a [`Foreground`].
+    static FOREGROUND: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Longest a background query waits for running world ticks before it takes
+/// its turn anyway, so a world that is always ticking cannot starve it.
+const BACKGROUND_WAIT_LIMIT: Duration = Duration::from_millis(200);
+
+/// Marks a world tick's use of a [`NavMesh`]; see [`NavMesh::foreground`].
+pub(crate) struct Foreground<'a> {
+    mesh: &'a NavMesh,
+    outer: bool,
+}
+
+impl Drop for Foreground<'_> {
+    fn drop(&mut self) {
+        self.mesh.foreground.fetch_sub(1, Ordering::Release);
+        FOREGROUND.with(|f| f.set(self.outer));
+    }
 }
 pub(crate) type GateCache =
     std::collections::HashMap<u64, (crate::navmesh_structure_gates::GateSources, PolyGate)>;
@@ -833,20 +868,49 @@ impl NavMesh {
             structure_gates: Mutex::new(None),
             structure_snapshot: Mutex::new(None),
             structure_gate_cache: Mutex::new(Default::default()),
+            foreground: AtomicUsize::new(0),
         };
         mesh.validate_drop_links()?;
         // A wide mesh can hold up to 128 MiB of tiles; keep one copy, not two.
         mesh.artifact.detour_data = Vec::new();
         Ok(mesh)
     }
+    /// Give this thread's queries priority over background queries until the
+    /// guard drops. The world tick holds it for the whole tick.
+    ///
+    /// Every query locks the one native query object. Off-tick workers (spawn
+    /// route checks, squad routes, structure gates) run whole-mesh searches
+    /// that can hold it for tens of milliseconds each, back to back, while a
+    /// tick locks it once or more per moving bot. Without a turn order every
+    /// such lock could wait for a full background search, so one tick could
+    /// last a second. With the guard held, a background query waits for the
+    /// tick to finish (at most [`BACKGROUND_WAIT_LIMIT`]) before it starts, so
+    /// a tick waits for at most the one background search already running.
+    pub(crate) fn foreground(&self) -> Foreground<'_> {
+        self.foreground.fetch_add(1, Ordering::Acquire);
+        let outer = FOREGROUND.with(|f| f.replace(true));
+        Foreground { mesh: self, outer }
+    }
+    /// Lock the native query object; a background thread first lets running
+    /// world ticks finish.
+    fn lock_native(&self) -> Result<MutexGuard<'_, Native>, Error> {
+        if !FOREGROUND.with(Cell::get) {
+            let began = Instant::now();
+            while self.foreground.load(Ordering::Acquire) > 0
+                && began.elapsed() < BACKGROUND_WAIT_LIMIT
+            {
+                std::thread::sleep(Duration::from_micros(500));
+            }
+        }
+        self.native
+            .lock()
+            .map_err(|_| Error("navmesh_query_poisoned"))
+    }
     /// Polygons whose bounds overlap the box `min`..`max`.
     pub(crate) fn polys_in_box(&self, min: Point, max: Point) -> Result<Vec<u64>, Error> {
         let center = std::array::from_fn::<f32, 3, _>(|i| ((min[i] + max[i]) * 0.5) as f32);
         let half = std::array::from_fn::<f32, 3, _>(|i| ((max[i] - min[i]) * 0.5) as f32);
-        let h = self
-            .native
-            .lock()
-            .map_err(|_| Error("navmesh_query_poisoned"))?;
+        let h = self.lock_native()?;
         let mut out = vec![0u64; 4096];
         let n = unsafe {
             mag_nav_polys_in_box(h.0, center.as_ptr(), half.as_ptr(), out.as_mut_ptr(), 4096)
@@ -858,10 +922,7 @@ impl NavMesh {
         Ok(out)
     }
     pub(crate) fn poly_info(&self, poly: u64) -> Result<PolyInfo, Error> {
-        let h = self
-            .native
-            .lock()
-            .map_err(|_| Error("navmesh_query_poisoned"))?;
+        let h = self.lock_native()?;
         let mut verts = [0f32; 18];
         let mut links = [0u64; 64];
         let mut portals = [0f32; 6 * 64];
@@ -897,10 +958,7 @@ impl NavMesh {
     ) -> Result<Vec<Option<f64>>, Error> {
         let flat: Vec<f32> = xz.iter().flat_map(|p| [p[0] as f32, p[1] as f32]).collect();
         let mut y = vec![0f32; xz.len()];
-        let h = self
-            .native
-            .lock()
-            .map_err(|_| Error("navmesh_query_poisoned"))?;
+        let h = self.lock_native()?;
         unsafe {
             mag_nav_poly_heights(h.0, poly, flat.as_ptr(), xz.len() as c_int, y.as_mut_ptr())
         };
@@ -936,10 +994,7 @@ impl NavMesh {
             .structure_snapshot
             .lock()
             .map_err(|_| Error("navmesh_query_poisoned"))? = None;
-        let h = self
-            .native
-            .lock()
-            .map_err(|_| Error("navmesh_query_poisoned"))?;
+        let h = self.lock_native()?;
         let mut installed = self
             .structure_gates
             .lock()
@@ -1082,10 +1137,7 @@ impl NavMesh {
             .map_err(|_| Error("navmesh_query_poisoned"))?
             .clone()
             .filter(|s| !s.enclosed(start));
-        let h = self
-            .native
-            .lock()
-            .map_err(|_| Error("navmesh_query_poisoned"))?;
+        let h = self.lock_native()?;
         let status = unsafe {
             mag_nav_route(
                 h.0,
@@ -1167,10 +1219,7 @@ impl NavMesh {
         if !valid_point(start) || !valid_point(goal) {
             return err("navmesh_invalid_request");
         }
-        let h = self
-            .native
-            .lock()
-            .map_err(|_| Error("navmesh_query_poisoned"))?;
+        let h = self.lock_native()?;
         let s = start.map(|v| v as f32);
         let g = goal.map(|v| v as f32);
         let mut closest = [0f32; 3];
@@ -1201,10 +1250,7 @@ impl NavMesh {
         if !valid_point(position) {
             return err("navmesh_invalid_request");
         }
-        let h = self
-            .native
-            .lock()
-            .map_err(|_| Error("navmesh_query_poisoned"))?;
+        let h = self.lock_native()?;
         let p = position.map(|v| v as f32);
         let id = unsafe { mag_nav_component_id(h.0, p.as_ptr()) };
         if id < 0 {
@@ -1253,10 +1299,7 @@ impl NavMesh {
         goal: Point,
         query: impl FnOnce(*mut std::ffi::c_void, *const f32, *mut c_int, *mut f32, *mut c_int) -> c_int,
     ) -> Result<Vec<(i32, Point)>, Error> {
-        let h = self
-            .native
-            .lock()
-            .map_err(|_| Error("navmesh_query_poisoned"))?;
+        let h = self.lock_native()?;
         let g = goal.map(|v| v as f32);
         let mut ids = [0; 128];
         let mut points = [0f32; 384];
@@ -1314,7 +1357,7 @@ impl NavMesh {
         {
             return false;
         }
-        let Ok(h) = self.native.lock() else {
+        let Ok(h) = self.lock_native() else {
             return false;
         };
         let p = position.map(|v| v as f32);

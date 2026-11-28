@@ -18,6 +18,9 @@ impl<W: Write> Engine<W> {
             return self.world_response(request_id, Vec::new());
         }
         self.last_world_tick = Some(now);
+        // The tick's navmesh queries go before off-tick workers' searches.
+        let mesh = self.navmesh_world.clone();
+        let _foreground = mesh.as_deref().map(crate::navmesh::NavMesh::foreground);
         let result = (|| {
             use tick_timing::{Phase, timed};
             let mut messages = timed!(self, Phase::Peers, self.expire_world_peers(now, wall))?;

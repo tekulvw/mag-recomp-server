@@ -133,9 +133,23 @@ So the server never routes for a spawn choice inside the world tick:
   population on its own worker thread, started at the same time. Until it
   answers, squads rank as routable, as they do without navigation data.
 
+The workers and the tick share the navmesh's one native query object, and a
+worker search holds it for the whole search. A world tick locks it at least
+once per moving bot, so with no turn order every one of those locks could
+wait for a whole worker search. Late in a live 256-character Domination match
+(0.19.0, 2026-11-28) the spawn-route worker had used 212 s of CPU, and the
+world spent up to 28% of the time in ticks of 0.5–1 s; every client event,
+hits included, waited behind them. So the tick now goes first: while a world
+tick runs, a worker waits before it starts a navmesh query (at most 200 ms,
+so a world that never stops ticking cannot starve it), and a tick waits only
+for the one worker search already under way. The structure gate and squad
+route workers wait the same way.
+
 Synthetic unit tests keep the routes inline so their expectations are
 unchanged. The headless simulation queues as live, then waits for the answers
-outside its timed phases, so a run stays deterministic.
+outside its timed phases, so a run stays deterministic. With
+`MAG_SIM_CLOCK=wall` (see [headless-simulation.md](headless-simulation.md))
+it lets the workers run beside the tick instead, as live.
 
 ## First lives
 
