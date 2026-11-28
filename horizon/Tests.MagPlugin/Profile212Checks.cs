@@ -261,6 +261,14 @@ internal static class Profile212Checks
             var clan = RawEnvelope(Convert.FromHexString("01fc020100000001000000"), 1);
             Check(mls.HandleMany(clan, now).Count == 0 && mls.LastRefusal == "unknown-or-malformed-type",
                 "1793 used the unverified legacy clan decoder");
+            // A legacy training catalog must not mutate a 1793 character just
+            // because the header-only message number happens to be unchanged.
+            store.TrainingCompletionCatalog = MagTrainingCompletionCatalog.Load(
+                TrainingLevelChecks.Catalog(Path.Combine(directory, "legacy-training.json"), 3));
+            byte[] beforeTraining = File.ReadAllBytes(Path.Combine(directory, "characters.json"));
+            Check(mls.HandleMany(Envelope(new MagTrainingCompletedRequest()), now).Count == 0 &&
+                beforeTraining.SequenceEqual(File.ReadAllBytes(Path.Combine(directory, "characters.json"))),
+                "1793 character received an unqualified legacy training reward");
             var logout = mls.HandleMany(Envelope(new MagRetailAccountLogoutRequest()), now).Single();
             Check(logout.PluginId == 1 && Read(logout) is MagRetailAccountLogoutResponse {Success: true}, "1793 MLS logout not acknowledged");
             registry.Release("synthetic-212-channel");

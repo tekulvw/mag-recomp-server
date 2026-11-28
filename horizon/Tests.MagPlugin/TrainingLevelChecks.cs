@@ -16,7 +16,7 @@ internal static class TrainingLevelChecks
 
     static void Check(bool value, string message) { if (!value) throw new Exception(message); }
 
-    static string Catalog(string path, int levels)
+    internal static string Catalog(string path, int levels)
     {
         object Level(int xp, int points) => new { ExperienceLevel = new { Experience = xp, SkillPointsGained = points, LoadoutBudget = 0, Rank = 0 } };
         var rows = new Dictionary<string, object> { { "ExperienceLevel1", Level(0, 1) }, { "ExperienceLevel2", Level(100, 1) }, { "ExperienceLevel3", Level(250, 2) } };

@@ -93,7 +93,8 @@ New local record extensions use explicit zero policy pending native acceptance.
 The current synthetic acceptance covers complete preinstalled patch checks,
 required signed tickets as well as opt-in development names, all3 selectable
 slots, creation, MAS login/data and MLS bind/protocol/keepalive/logout. Old clan
-and party handling is disabled under1793; queue/status/gameplay remain future
+and party handling is disabled under1793; legacy training rewards cannot mutate
+1793 records. Queue/status/gameplay remain future
 work. Native-client acceptance additionally requires qualified2.12 character
 catalogs and recomp boot readiness. Local server deployment remains stopped
 until those owners receive an explicit source/config ready handoff.

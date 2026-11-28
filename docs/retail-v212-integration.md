@@ -62,7 +62,7 @@ through config reload. New record extension values default to zero as explicit
 local policy; their meanings and accepted native defaults remain unknown.
 
 **This is not native-client acceptance or a gameplay activation contract.**
-Queue/status/clan/party wire formats remain unimplemented under1793, and no old
+Queue/status/clan/party wire formats and training rewards remain unqualified under1793, and no old
 codec fallback is allowed for them. A qualified2.12 character catalog set and
 client boot readiness are still required before any live acceptance run.
 

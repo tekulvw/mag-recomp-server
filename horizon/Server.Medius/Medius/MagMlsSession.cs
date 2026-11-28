@@ -78,6 +78,12 @@ namespace Server.Medius
                 ObserveActivity(now);
                 return new[] { MagPluginRouting.ToMlsClient(new MagRetailAccountLogoutResponse { TransactionId = logout.TransactionId, Success = true }, ApplicationId, WireProtocolVersion) };
             }
+            if (message is MagTrainingCompletedRequest && ApplicationId == 20231 && WireProtocolVersion == 1793 && State == SessionState.Ready)
+            {
+                LastRefusal = "training-catalog-not-qualified-for-1793";
+                ObserveActivity(now);
+                return Array.Empty<RT_MSG_SERVER_PLUGIN_TO_APP>();
+            }
             if (message is MagTrainingCompletedRequest && ApplicationId == 20231 && State == SessionState.Ready)
             {
                 try
