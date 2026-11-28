@@ -439,7 +439,7 @@ namespace Server.Medius
                 account = c.Account, level = c.Level, experience = c.Experience, skill_points = c.SkillPoints,
                 next_level_experience = c.NextLevelExperience, session = c.Session,
                 respec_points = c.RespecPoints, stored_respec_points = c.StoredRespecPoints, respec_count = c.RespecCount,
-                next_respec_fee = c.NextRespecFee,
+                next_respec_fee = c.NextRespecFee, authored_respec_fee = c.AuthoredRespecFee,
                 character_id = c.CharacterId, name = c.Name, slot = c.Slot, faction = c.Faction,
                 characters = MagAdminOperations.Characters(_store, account, _markerDirectory, now).Select(x => new
                 {

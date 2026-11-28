@@ -24,10 +24,12 @@ namespace Server.Medius
         public uint RespecPoints { get; init; }
         /// <summary>The respec point balance as stored, before the floor.</summary>
         public uint StoredRespecPoints { get; init; }
-        /// <summary>Skill respecs the character has taken.</summary>
+        /// <summary>Skill respecs the character has taken (the stored count, whatever the client is sent).</summary>
         public byte RespecCount { get; init; }
-        /// <summary>What the next respec costs; null without a skill catalog that has respec fees.</summary>
+        /// <summary>What the next respec costs, after MAG_RESPEC_FEE_CAP; null without a skill catalog that has respec fees.</summary>
         public uint? NextRespecFee { get; init; }
+        /// <summary>The authored fee for the next respec, before the cap; null as for <see cref="NextRespecFee"/>.</summary>
+        public uint? AuthoredRespecFee { get; init; }
         /// <summary><c>online</c>, <c>offline</c> or <c>unknown</c> (no session marker).</summary>
         public string Session { get; init; }
         /// <summary>False when the store has no progression catalog; then there is no next level.</summary>
@@ -168,8 +170,9 @@ namespace Server.Medius
                 Account = c.Account, CharacterId = c.Id, Name = c.Name, Faction = c.Faction, Slot = c.Slot,
                 DeletedAt = c.DeletedAt is long deleted ? DateTimeOffset.FromUnixTimeSeconds(deleted) : null,
                 Level = r.Level, Experience = r.Experience, SkillPoints = r.SkillPoints,
-                RespecPoints = r.RespecPoints, StoredRespecPoints = c.RespecPoints ?? 0, RespecCount = r.RespecCount,
-                NextRespecFee = store.SkillCatalog != null && store.SkillCatalog.TryRespecFee(r.RespecCount, out uint fee) ? fee : null,
+                RespecPoints = r.RespecPoints, StoredRespecPoints = c.RespecPoints ?? 0, RespecCount = c.RespecCount ?? 0,
+                NextRespecFee = store.SkillCatalog != null && store.SkillCatalog.TryRespecFee(c.RespecCount ?? 0, store.RespecFeeCap, out uint fee) ? fee : null,
+                AuthoredRespecFee = store.SkillCatalog != null && store.SkillCatalog.TryRespecFee(c.RespecCount ?? 0, out uint authored) ? authored : null,
                 Session = Session(active, c.Account), HasProgressionCatalog = catalog != null,
                 NextLevel = next ? (byte)(r.Level + 1) : null,
                 NextLevelExperience = next ? catalog.ThresholdForLevel((byte)(r.Level + 1)) : null

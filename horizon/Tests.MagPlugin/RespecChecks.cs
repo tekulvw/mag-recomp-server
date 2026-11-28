@@ -14,7 +14,7 @@ internal static partial class LeadershipProgressionChecks
 
     /// <summary>A retail Armory whose faction-0 kit 0 is a starter rifle (wire 1025) and kits 1 to 4 are empty, and a
     /// skill table with a free starter skill 0, a bought skill 3 (cost 2: rifle 1026 and sight 1028) and skill 5 (cost 1).</summary>
-    static (MagLoadoutCatalog Armory, MagSkillCatalog Skills) RespecCatalogs(string directory, bool withFees = true)
+    static (MagLoadoutCatalog Armory, MagSkillCatalog Skills) RespecCatalogs(string directory, bool withFees = true, uint[] fees = null)
     {
         object Item(int bit, string name, int? ammo) => new {
             wire_id = 1024 + bit, name, authored_ref = "synthetic:" + bit, available_bit = bit, factions = new[] { 0, 1, 2 }, primary_ammo = ammo };
@@ -49,7 +49,7 @@ internal static partial class LeadershipProgressionChecks
             })
         };
         if (withFees)
-            table["ReSpec"] = JsonSerializer.SerializeToNode(RespecFees.Select((fee, index) => (fee, index))
+            table["ReSpec"] = JsonSerializer.SerializeToNode((fees ?? RespecFees).Select((fee, index) => (fee, index))
                 .ToDictionary(row => "MagCharacterSkillReSpec" + row.index, row => (object)new { MagCharacterSkillReSpec = new { Points = row.fee } }));
         string skills = Path.Combine(directory, withFees ? "respec-skills.json" : "respec-skills-no-fees.json");
         File.WriteAllText(skills, new JsonObject {
@@ -61,10 +61,10 @@ internal static partial class LeadershipProgressionChecks
         return (MagLoadoutCatalog.LoadRetail(armory), MagSkillCatalog.LoadForApplication(skills, 20231));
     }
 
-    static LocalCharacterStore RespecStore(string path, string directory, uint? floor, bool withFees = true)
+    static LocalCharacterStore RespecStore(string path, string directory, uint? floor, bool withFees = true, uint? cap = null, uint[] fees = null)
     {
-        var (armory, skills) = RespecCatalogs(directory, withFees);
-        return new LocalCharacterStore(path) { LoadoutCatalog = armory, SkillCatalog = skills, RespecPointsFloor = floor };
+        var (armory, skills) = RespecCatalogs(directory, withFees, fees);
+        return new LocalCharacterStore(path) { LoadoutCatalog = armory, SkillCatalog = skills, RespecPointsFloor = floor, RespecFeeCap = cap };
     }
 
     /// <summary>Account alpha with characters in slots 0 to 2 (alpha!0..alpha!2), each with five skill points.</summary>
@@ -323,4 +323,91 @@ internal static partial class LeadershipProgressionChecks
         try { Sql(connection, $"UPDATE mag.characters SET respec_count = 256 WHERE id = {id}"); } catch (Npgsql.PostgresException) { refused = true; }
         Check(refused, "The respec count is a byte");
     }));
+
+    // Invented rising fees whose first tier is the cap below; deliberately not the retail table.
+    static readonly uint[] RisingFees = { 3000, 4400, 7100 };
+    const uint RespecCap = 3000;
+
+    /// <summary>The fee the client shows for a record: its own table looked up with the record's count, the last row
+    /// once the count runs past it (the retail skill screen's ReSpecCost with kCharInfoReSpecCount).</summary>
+    static uint ClientShownFee(MagCharacterRecord record, uint[] fees) => fees[Math.Min(record.RespecCount, fees.Length - 1)];
+
+    public static void RespecFeeCapSetting()
+    {
+        Check(Server.Medius.Program.ParseRespecFeeCap(null) == null && Server.Medius.Program.ParseRespecFeeCap("") == null, "Unset cap is null");
+        Check(Server.Medius.Program.ParseRespecFeeCap("3000") == 3000 && Server.Medius.Program.ParseRespecFeeCap("0") == 0, "Valid caps parse");
+        foreach (var bad in new[] { "-1", "3k", "4294967296", "1.0" })
+        {
+            bool threw = false;
+            try { Server.Medius.Program.ParseRespecFeeCap(bad); } catch (InvalidDataException e) { threw = e.Message.Contains("MAG_RESPEC_FEE_CAP"); }
+            Check(threw, "Invalid MAG_RESPEC_FEE_CAP must fail startup naming it: " + bad);
+        }
+        WithDirectory(directory =>
+        {
+            var (_, skills) = RespecCatalogs(directory, fees: RisingFees);
+            Check(skills.TryRespecFee(5, 3000, out uint fee) && fee == 3000 && skills.TryRespecFee(1, 5000, out fee) && fee == 4400 &&
+                skills.TryRespecFee(1, null, out fee) && fee == 4400, "The charged fee is the authored one, lowered to the cap");
+            // The count the client is sent makes its own lookup show the charged fee where its table can.
+            Check(skills.ClientRespecCount(9, null) == 9 && skills.ClientRespecCount(9, 8000) == 9 && skills.ClientRespecCount(1, 4400) == 1,
+                "Without a lowering cap the client gets the true count");
+            Check(skills.ClientRespecCount(9, 3000) == 0 && skills.ClientRespecCount(2, 5000) == 1 && skills.ClientRespecCount(0, 3000) == 0,
+                "A lowering cap sends the highest count whose authored fee is within it");
+            Check(skills.ClientRespecCount(4, 100) == 0, "A cap below every fee sends count 0, the cheapest the client can show");
+        });
+    }
+
+    /// <summary>With the floor and the cap both at 3000, ten respecs in a row all succeed, each costing 3000 and each
+    /// showing the client a 3000 fee, while the stored count stays exact. Without the cap the fees rise as authored.</summary>
+    public static void RespecFeeCapRepeats() => WithDirectory(directory =>
+    {
+        string path = Path.Combine(directory, "characters.json");
+        var store = RespecStore(path, directory, RespecFloor, cap: RespecCap, fees: RisingFees);
+        CreateThreeSlots(store, path);
+        uint id = Slot(store, 0).Id;
+        Check(ClientShownFee(Slot(store, 0).ToRecord(), RisingFees) == 3000, "Before any respec the client shows 3000");
+        WithApplication(20231, () =>
+        {
+            var session = MakeSession(store, 20231, "alpha", id);
+            for (int respec = 1; respec <= 10; respec++)
+            {
+                Check(store.PurchaseSkillForAccount("alpha", id, 3).Reason == "skill-purchase-committed", $"Rebuy before respec {respec}");
+                var reply = Respec(session);
+                Check(reply.Success && session.StorageStatus == "skill-respec-committed/fee=3000/refunded=2", $"Respec {respec}: {session.StorageStatus}");
+                Check(reply.Record.RespecPoints == 3000 && reply.Record.SkillPoints == 5 && ClientShownFee(reply.Record, RisingFees) == 3000 &&
+                    reply.Record.RespecCount == 0, $"Respec {respec}: the client must see 3000 points and a 3000 fee");
+                var stored = Slot(store, 0);
+                Check(stored.RespecCount == respec && stored.RespecPoints == 0 && ClientShownFee(stored.ToRecord(), RisingFees) == 3000,
+                    $"Respec {respec}: the stored count is exact and the balance is topped up");
+                byte[] wire = MagMessageCodec.SerializeForApplication(new MagCharacterRecordNotification { Record = stored.ToRecord() }, 20231);
+                Check(MagMessageCodec.TryParseForApplication(wire, 20231, out var parsed) && parsed is MagCharacterRecordNotification n &&
+                    n.Record.RespecCount == 0 && n.Record.RespecPoints == 3000, $"Respec {respec}: the record on the wire");
+            }
+        });
+
+        // The admin view keeps the true count and shows the capped fee next to the authored one.
+        var now = SlotNow.UtcDateTime;
+        string backups = Path.Combine(directory, ".maintenance-backups"), markers = Path.Combine(directory, "markers");
+        Directory.CreateDirectory(markers);
+        MagActiveAccounts.Write(Path.Combine(markers, MagActiveAccounts.FilePrefix + "main.json"), new Dictionary<string, DateTime>(), now);
+        var output = new StringWriter(); var error = new StringWriter();
+        Check(MagAdminCli.Run(new[] { "character", "show", "alpha", "--slot", "0" }, store, backups, markers, now, output, error) == 0, "Show: " + error);
+        Check(output.ToString().Contains("respec:       3000 points (stored 0, floor applied), 10 taken, next costs 3000 (capped from 7100)"),
+            "Show with the cap: " + output);
+        var api = new MagAdminApi(new System.Net.IPEndPoint(System.Net.IPAddress.Loopback, 0),
+            Encoding.UTF8.GetBytes("synthetic-admin-api-secret-0123456789abcdef"), store, backups, markers, () => now, _ => { });
+        var detail = JsonDocument.Parse(api.Handle(SignedSlot("GET", "/admin/v1/characters/alpha?slot=0", now)).Body).RootElement;
+        Check(detail.GetProperty("respec_count").GetInt32() == 10 && detail.GetProperty("next_respec_fee").GetUInt32() == 3000 &&
+            detail.GetProperty("authored_respec_fee").GetUInt32() == 7100 &&
+            detail.GetProperty("characters")[0].GetProperty("respec_count").GetInt32() == 10, "API with the cap: true count, capped fee");
+
+        // Unset: the client sees the true count and the authored fee, which the floor no longer covers.
+        var uncapped = RespecStore(path, directory, RespecFloor, fees: RisingFees);
+        var record = Slot(uncapped, 0).ToRecord();
+        Check(record.RespecCount == 10 && ClientShownFee(record, RisingFees) == 7100, "Without the cap the client sees the true count");
+        Check(uncapped.RespecSkillsForAccount("alpha", id).Reason == "insufficient-respec-points", "Without the cap the authored fee applies");
+        var fresh = Slot(uncapped, 1);
+        Check(fresh.ToRecord().RespecCount == 0 && uncapped.RespecSkillsForAccount("alpha", fresh.Id).Reason == "skill-respec-committed" &&
+            Slot(uncapped, 1).ToRecord().RespecCount == 1 && ClientShownFee(Slot(uncapped, 1).ToRecord(), RisingFees) == 4400 &&
+            uncapped.RespecSkillsForAccount("alpha", fresh.Id).Reason == "insufficient-respec-points", "Unset cap: fees rise as authored");
+    });
 }

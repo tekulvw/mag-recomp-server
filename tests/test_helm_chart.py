@@ -282,6 +282,18 @@ class ChartTests(unittest.TestCase):
         for invalid in (-1, 4294967296, '3000', [3000], 1.5):
             render({'runtime': {'respecPointsFloor': invalid}}, ok=False)
 
+    def test_optional_respec_fee_cap(self):
+        def medius_env(docs):
+            return [{e['name']: e.get('value') for e in c.get('env', [])}
+                    for d in docs if d['kind'] == 'Deployment'
+                    for c in d['spec']['template']['spec']['containers'] if c['name'] in ('medius', 'maps')]
+        self.assertTrue(all('MAG_RESPEC_FEE_CAP' not in env for env in medius_env(render())))
+        for cap in (0, 3000, 4294967295):
+            envs = medius_env(render({'runtime': {'respecFeeCap': cap}}))
+            self.assertTrue(len(envs) >= 2 and all(env.get('MAG_RESPEC_FEE_CAP') == str(cap) for env in envs))
+        for invalid in (-1, 4294967296, '3000', [3000], 1.5):
+            render({'runtime': {'respecFeeCap': invalid}}, ok=False)
+
     def test_optional_reward_ledger_open_match_ttl(self):
         def medius_env(docs):
             return [{e['name']: e.get('value') for e in c.get('env', [])}

@@ -188,6 +188,9 @@ spec:
             {{- with $root.Values.runtime.respecPointsFloor }}
             - {name: MAG_RESPEC_POINTS_FLOOR, value: {{ . | int64 | toString | quote }}}
             {{- end }}
+            {{- if ne $root.Values.runtime.respecFeeCap nil }}
+            - {name: MAG_RESPEC_FEE_CAP, value: {{ $root.Values.runtime.respecFeeCap | int64 | toString | quote }}}
+            {{- end }}
             {{- with $root.Values.runtime.rewardLedgerOpenMatchTtlHours }}
             - {name: MAG_REWARD_LEDGER_OPEN_MATCH_TTL_HOURS, value: {{ . | int | toString | quote }}}
             {{- end }}

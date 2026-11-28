@@ -156,6 +156,29 @@ namespace Server.Medius
             fee = _respecFees[Math.Min(respecCount, _respecFees.Length - 1)];
             return true;
         }
+        /// <summary>The fee the server charges for the next respec: the authored fee, lowered to <paramref name="cap"/>
+        /// when one is set. False when the catalog has no fees.</summary>
+        public bool TryRespecFee(byte respecCount, uint? cap, out uint fee)
+        {
+            if (!TryRespecFee(respecCount, out fee)) return false;
+            if (cap is uint limit && fee > limit) fee = limit;
+            return true;
+        }
+        /// <summary>
+        /// The respec count to put in the record the client receives. The client works out the fee it shows itself:
+        /// its skill screen looks up its own copy of the authored table with the record's count (the last row once the
+        /// count runs past it), the same lookup the server does. With no cap, or when the authored fee is within the cap,
+        /// that is the true count. When the cap lowers the fee, it is the highest count at or below the true one whose
+        /// authored fee is within the cap, so the client shows the fee the server charges; with a cap below every authored
+        /// fee it is 0, the cheapest the client can show. The stored count is never changed by this.
+        /// </summary>
+        public byte ClientRespecCount(byte respecCount, uint? cap)
+        {
+            if (cap is not uint limit || _respecFees.Length == 0) return respecCount;
+            for (int count = Math.Min(respecCount, _respecFees.Length - 1); count >= 0; count--)
+                if (_respecFees[count] <= limit) return count == Math.Min(respecCount, _respecFees.Length - 1) ? respecCount : (byte)count;
+            return 0;
+        }
         /// <summary>What a respec gives back for <paramref name="ownedSkills"/>: each defined skill's authored cost and
         /// the equipment that skill awarded <paramref name="faction"/>. Bits naming no defined skill refund nothing.</summary>
         internal (int Points, int[] Equipment) RespecRefund(byte faction, uint[] ownedSkills)

@@ -23,7 +23,7 @@ namespace Server.Medius
         /// skills and the equipment they awarded, rebuilds the five kits from the faction's authored defaults,
         /// counts the respec (capped at 255) and debits the fee. Starter (tier 0) skills cost nothing and stay
         /// granted. The balance spent is the stored one raised to <see cref="RespecPointsFloor"/>, which then tops
-        /// the remainder back up whenever the record is next built. See docs/skill-respec.md.
+        /// the remainder back up whenever the record is next built. <see cref="RespecFeeCap"/> caps the fee. See docs/skill-respec.md.
         /// </summary>
         public SkillRespecOutcome RespecSkillsForAccount(string account, uint characterId)
         {
@@ -35,7 +35,7 @@ namespace Server.Medius
             var character = Owned(session.Document.Characters, account, characterId);
             if (character == null) return Refused("character-not-owned");
             byte count = character.RespecCount ?? 0;
-            if (!skills.TryRespecFee(count, out uint fee)) return Refused("respec-fees-unavailable");
+            if (!skills.TryRespecFee(count, RespecFeeCap, out uint fee)) return Refused("respec-fees-unavailable");
             uint balance = Math.Max(character.RespecPoints ?? 0, RespecPointsFloor ?? 0);
             if (balance < fee) return Refused("insufficient-respec-points", fee);
             var defaults = armory.DefaultsForFaction(character.Faction);

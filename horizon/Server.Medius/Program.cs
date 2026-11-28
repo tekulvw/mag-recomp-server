@@ -64,6 +64,8 @@ namespace Server.Medius
         public static byte? TrainingLevel { get; private set; }
         /// <summary>Optional operator floor for every character's respec points (MAG_RESPEC_POINTS_FLOOR).</summary>
         public static uint? RespecPointsFloor { get; private set; }
+        /// <summary>Optional operator cap on every respec's fee (MAG_RESPEC_FEE_CAP).</summary>
+        public static uint? RespecFeeCap { get; private set; }
         /// <summary>Hours an open match reward row may go without a reward before it can be compacted
         /// (MAG_REWARD_LEDGER_OPEN_MATCH_TTL_HOURS).</summary>
         public static TimeSpan OpenMatchRowTtl { get; private set; } = LocalCharacterStore.DefaultOpenMatchRowTtl;
@@ -83,7 +85,7 @@ namespace Server.Medius
             store.ProgressionCatalog = Settings.MagApplicationId == 20231 || Settings.EnableMagCharacterCatalogs ? ProgressionCatalog : null;
             store.InitialSkillPoints = Settings.EnableMagCharacterCatalogs ? InitialSkillPoints : (byte)0;
             store.StartingLevel = StartingLevel; store.TrainingLevel = TrainingLevel; store.OpenMatchRowTtl = OpenMatchRowTtl;
-            store.RespecPointsFloor = RespecPointsFloor;
+            store.RespecPointsFloor = RespecPointsFloor; store.RespecFeeCap = RespecFeeCap;
             store.LedgerMaintenance = message => Logger.Info(message);
             return store;
         }
@@ -146,11 +148,15 @@ namespace Server.Medius
         }
         /// <summary>Fail fast on a respec point floor that is not a whole number of points from 0 to 4294967295.
         /// Unset or empty is null: balances stay as stored.</summary>
-        public static uint? ParseRespecPointsFloor(string value)
+        public static uint? ParseRespecPointsFloor(string value) => ParseRespecPoints("MAG_RESPEC_POINTS_FLOOR", value);
+        /// <summary>Fail fast on a respec fee cap that is not a whole number of points from 0 to 4294967295.
+        /// Unset or empty is null: the authored fees apply.</summary>
+        public static uint? ParseRespecFeeCap(string value) => ParseRespecPoints("MAG_RESPEC_FEE_CAP", value);
+        static uint? ParseRespecPoints(string variable, string value)
         {
             if (string.IsNullOrWhiteSpace(value)) return null;
             if (!uint.TryParse(value.Trim(), System.Globalization.NumberStyles.None, System.Globalization.CultureInfo.InvariantCulture, out uint points))
-                throw new InvalidDataException("MAG_RESPEC_POINTS_FLOOR must be a whole number of respec points from 0 to 4294967295.");
+                throw new InvalidDataException($"{variable} must be a whole number of respec points from 0 to 4294967295.");
             return points;
         }
         /// <summary>Fail fast on a starting level the progression catalog cannot represent.</summary>
@@ -189,6 +195,7 @@ namespace Server.Medius
             TrainingLevel = ParseTrainingLevel(Environment.GetEnvironmentVariable("MAG_TRAINING_LEVEL"), ProgressionCatalog, TrainingCompletionCatalog);
             OpenMatchRowTtl = ParseOpenMatchRowTtl(Environment.GetEnvironmentVariable("MAG_REWARD_LEDGER_OPEN_MATCH_TTL_HOURS"));
             RespecPointsFloor = ParseRespecPointsFloor(Environment.GetEnvironmentVariable("MAG_RESPEC_POINTS_FLOOR"));
+            RespecFeeCap = ParseRespecFeeCap(Environment.GetEnvironmentVariable("MAG_RESPEC_FEE_CAP"));
             // Retail purchases are independent of prototype kit/grant activation.
             string retailSkills = Environment.GetEnvironmentVariable("MAG_RETAIL_SKILL_CATALOG");
             if (!string.IsNullOrEmpty(retailSkills) && (Settings.MagApplicationId != 20231 || !Path.IsPathFullyQualified(retailSkills)))

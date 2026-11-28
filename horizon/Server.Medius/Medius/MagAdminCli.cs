@@ -365,10 +365,11 @@ is online, and without --apply they are dry runs too.";
                     (x.Deleted ? $"  deleted {Time(x.DeletedAt)}" : ""));
         }
 
-        /// <summary>"3000 points (stored 0, floor applied), 1 taken, next costs 5000".</summary>
+        /// <summary>"3000 points (stored 0, floor applied), 1 taken, next costs 3000 (capped from 5000)".</summary>
         static string RespecSummary(MagAdminAccount c) =>
             $"{c.RespecPoints} points" + (c.RespecPoints != c.StoredRespecPoints ? $" (stored {c.StoredRespecPoints}, floor applied)" : "") +
-            $", {c.RespecCount} taken" + (c.NextRespecFee is uint fee ? $", next costs {fee}" : "");
+            $", {c.RespecCount} taken" + (c.NextRespecFee is uint fee ? $", next costs {fee}" : "") +
+            (c.AuthoredRespecFee is uint authored && authored != c.NextRespecFee ? $" (capped from {authored})" : "");
 
         private static int RestoreOrPurge(LocalCharacterStore store, string action, string account, string name, bool apply, string backupDirectory,
             TextWriter output, TextWriter error)
