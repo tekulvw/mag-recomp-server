@@ -218,7 +218,10 @@ impl<W: Write> Engine<W> {
         bot.stance = 0;
         bot.healing = Default::default();
         bot.received_healing = None;
-        bot.task = Default::default();
+        // Resume the objective task the bot had when it went down: its
+        // destination stands, only the route is planned again.
+        bot.task = bot.task_before_down.take().unwrap_or_default();
+        bot.task.resume_after_supply(now);
         bot.move_attempted = false;
         runtime.phase = development_target::BotPhase::Complete;
         runtime.since = now;
@@ -436,6 +439,7 @@ impl<W: Write> Engine<W> {
         )?;
         let bot = self.bot_registry.bots.get_mut(&id).unwrap();
         bot.downed = None;
+        bot.task_before_down = None;
         bot.damage = damage;
         runtime.since = now;
         runtime.last_update = now;

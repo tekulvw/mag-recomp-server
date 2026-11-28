@@ -2900,7 +2900,10 @@ impl<W: Write> Engine<W> {
                         .map(|(id, _, _)| id),
                 );
             }
-            self.tick_bot_medic_approaches(now, &busy, &mut receipts)?
+            let timing = self.tick_timing_start();
+            let approaching = self.tick_bot_medic_approaches(now, &busy, &mut receipts)?;
+            self.tick_timing_end(crate::tick_timing::Phase::BotsMedics, timing);
+            approaching
         };
         let mut covered = self.bot_cover.controlled_ids();
         let mut preempted: Vec<u16> = approaching.intersection(&covered).copied().collect();

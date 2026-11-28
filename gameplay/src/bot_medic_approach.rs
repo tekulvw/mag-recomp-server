@@ -41,6 +41,9 @@ pub(crate) struct Approach {
     pub(crate) best_distance_m: f64,
     pub(crate) progress_at: Duration,
     pub(crate) arrived: bool,
+    /// The patient's downed deadline: a failed pair is not tried again
+    /// before it.
+    pub(crate) deadline: Duration,
 }
 
 /// No progress for this long ends an approach (a route that cannot be walked,
@@ -52,6 +55,8 @@ const NEW_APPROACHES_PER_TICK: usize = 4;
 struct DownedPatient {
     patient: Patient,
     generation: u32,
+    /// When the patient's downed life ends at the latest.
+    deadline: Duration,
     team: u8,
     feet: [f64; 3],
     position: replication::CharacterPosition,
@@ -86,19 +91,22 @@ impl<W: Write> Engine<W> {
             patients.push(DownedPatient {
                 patient: Patient::Human(a.reservation.player),
                 generation,
+                deadline: downed.deadline,
                 team: a.team(),
                 feet: [p.x.into(), p.y.into(), p.z.into()],
                 position: p,
             });
         }
         for (&id, bot) in &self.bot_registry.bots {
-            let (Some(generation), Some(r)) = (self.bot_revivable(id, now), bot.target.runtime)
+            let (Some(generation), Some(r), Some(downed)) =
+                (self.bot_revivable(id, now), bot.target.runtime, bot.downed)
             else {
                 continue;
             };
             patients.push(DownedPatient {
                 patient: Patient::Bot(id),
                 generation,
+                deadline: downed.state.deadline,
                 team: bot.target.squad.team(),
                 feet: r.physical_position(),
                 position: r.position,
@@ -145,8 +153,9 @@ impl<W: Write> Engine<W> {
             {
                 r.phase = BotPhase::Complete;
             }
-            // The objective task plans again from where the medic stands.
-            bot.task = Default::default();
+            // The objective task resumes: its destination stands, and only
+            // the route there is planned again.
+            bot.task.resume_after_supply(now);
         }
         json!({"op":"bot_medic_approach_ended","timestamp_ms":now.as_millis() as u64,
             "object_index":id,"reason":reason,
@@ -213,11 +222,12 @@ impl<W: Write> Engine<W> {
             };
             if let Some(reason) = reason {
                 if reason == "no_progress" {
-                    // Let another medic, or this one later, try instead.
+                    // Let another medic try instead; this one does not retry
+                    // the same downed life.
                     self.bot_registry
                         .director
                         .medic_failures
-                        .insert((id, approach.patient), now + STALL);
+                        .insert((id, approach.patient), approach.deadline);
                 }
                 let receipt = self.end_medic_approach(id, reason, now);
                 receipts.push(receipt);
@@ -236,42 +246,59 @@ impl<W: Write> Engine<W> {
             .values()
             .filter_map(|b| b.medic_approach.map(|a| a.patient))
             .collect();
+        let waiting: Vec<&DownedPatient> = patients
+            .iter()
+            .filter(|p| !served.contains(&p.patient))
+            .collect();
+        if waiting.is_empty() && served.is_empty() {
+            return Ok(BTreeSet::new());
+        }
+        // Free medics, once per tick.
+        let medics: Vec<(u16, u8, [f64; 3])> = if waiting.is_empty() {
+            Vec::new()
+        } else {
+            self.bot_registry
+                .bots
+                .iter()
+                .filter_map(|(&id, bot)| {
+                    let r = bot.target.runtime?;
+                    let free = bot.medic_approach.is_none()
+                        && !busy.contains(&id)
+                        && bot.health > 0
+                        && bot.downed.is_none()
+                        && !matches!(r.phase, BotPhase::Dead)
+                        && r.physics_motion.is_some_and(|m| m.grounded)
+                        && !r.navmesh_state.on_player
+                        && !bot.has_supply_action()
+                        && !bot.drop_committed
+                        && bot.drop_permit.is_none()
+                        && bot.drop_waiting.is_none()
+                        && crate::bot_healing::medkit_slot(
+                            &self.item_catalog,
+                            team_item,
+                            &bot.target.loadout,
+                        )
+                        .is_some();
+                    free.then(|| (id, bot.target.squad.team(), r.physical_position()))
+                })
+                .collect()
+        };
         // Nearest free medic per unserved patient, nearest pairs first.
         let mut pairs = Vec::new();
-        for patient in patients.iter().filter(|p| !served.contains(&p.patient)) {
-            for (&id, bot) in &self.bot_registry.bots {
-                let Some(r) = bot.target.runtime else {
-                    continue;
-                };
+        for patient in waiting {
+            for &(id, team, at) in &medics {
                 if patient.patient == Patient::Bot(id)
-                    || bot.medic_approach.is_some()
-                    || busy.contains(&id)
-                    || bot.health == 0
-                    || bot.downed.is_some()
-                    || matches!(r.phase, BotPhase::Dead)
-                    || bot.target.squad.team() != patient.team
-                    || !r.physics_motion.is_some_and(|m| m.grounded)
-                    || r.navmesh_state.on_player
-                    || bot.has_supply_action()
-                    || bot.drop_committed
-                    || bot.drop_permit.is_some()
-                    || bot.drop_waiting.is_some()
+                    || team != patient.team
                     || self
                         .bot_registry
                         .director
                         .medic_failures
                         .get(&(id, patient.patient))
                         .is_some_and(|until| *until > now)
-                    || crate::bot_healing::medkit_slot(
-                        &self.item_catalog,
-                        team_item,
-                        &bot.target.loadout,
-                    )
-                    .is_none()
                 {
                     continue;
                 }
-                let d = distance(r.physical_position(), patient.feet);
+                let d = distance(at, patient.feet);
                 if d <= radius {
                     pairs.push((d, id, patient));
                 }
@@ -305,6 +332,21 @@ impl<W: Write> Engine<W> {
                 let Some(mesh) = mesh else {
                     break;
                 };
+                // Different walking components need a passage or have no
+                // path at all: never start an approach that cannot finish.
+                let same_component = matches!(
+                    (mesh.component_id(me), mesh.component_id(patient.feet)),
+                    (Ok(a), Ok(b)) if a == b
+                );
+                if !same_component {
+                    self.bot_registry
+                        .director
+                        .medic_failures
+                        .insert((id, patient.patient), patient.deadline);
+                    receipts.push(json!({"op":"bot_medic_approach_unroutable","timestamp_ms":now.as_millis() as u64,
+                        "object_index":id,"patient":patient.patient.audit(),"reason":"navmesh_component"}));
+                    continue;
+                }
                 let old_pending = bot.target.pending_move.take();
                 let old_runtime = bot.target.runtime;
                 let result = bot.target.begin_registry_move(
@@ -323,13 +365,25 @@ impl<W: Write> Engine<W> {
                     self.fall_damage_rules.as_ref(),
                 );
                 started += 1;
+                // A route through a passage stalls at it (the medic holds no
+                // permit), and a long detour is not worth the walk.
+                let result = result.and_then(|()| {
+                    bot.target
+                        .registry_route()
+                        .filter(|route| {
+                            route.waypoint_drop_ids.iter().all(Option::is_none)
+                                && route.length_m <= 2. * radius
+                        })
+                        .map(|_| ())
+                        .ok_or("medic_route_passage_or_detour")
+                });
                 if let Err(reason) = result {
                     bot.target.pending_move = old_pending;
                     bot.target.runtime = old_runtime;
                     self.bot_registry
                         .director
                         .medic_failures
-                        .insert((id, patient.patient), now + STALL);
+                        .insert((id, patient.patient), patient.deadline);
                     receipts.push(json!({"op":"bot_medic_approach_unroutable","timestamp_ms":now.as_millis() as u64,
                         "object_index":id,"patient":patient.patient.audit(),"reason":reason}));
                     continue;
@@ -338,7 +392,7 @@ impl<W: Write> Engine<W> {
                 bot.target.pending_move = None;
                 bot.target.runtime.as_mut().unwrap().phase = BotPhase::Complete;
             }
-            bot.task = Default::default();
+            // The objective task is left as it is and resumes afterwards.
             bot.medic_approach = Some(Approach {
                 patient: patient.patient,
                 generation: patient.generation,
@@ -346,6 +400,7 @@ impl<W: Write> Engine<W> {
                 best_distance_m: horizontal(me, patient.feet),
                 progress_at: now,
                 arrived: !walk,
+                deadline: patient.deadline,
             });
             receipts.push(
                 json!({"op":"bot_medic_approach_started","timestamp_ms":now.as_millis() as u64,

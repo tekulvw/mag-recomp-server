@@ -405,3 +405,60 @@ fn a_medic_walks_over_on_the_world_tick_and_revives_the_downed_bot() {
     engine.tick_bots(revived_at + at(50), 1).unwrap();
     assert_eq!(ended(&engine), ["patient_revived"]);
 }
+
+#[test]
+fn a_patient_off_the_medics_walking_component_gets_no_approach_and_no_retry() {
+    // The generated navmesh covers 1..119 m; the patient lies beyond it.
+    let slots = [(A, SA, 110., 60.), (A, SA, 115., 60.)];
+    let mut engine = world(&slots, &[(110., 60.)]);
+    let (medic, patient) = (bot_at(&engine, 110., 60.), bot_at(&engine, 115., 60.));
+    down(&mut engine, patient, at(0));
+    place(&mut engine, patient, 125., 60.);
+    plan_tick(&mut engine, 1000);
+    assert!(approach(&engine, medic).is_none());
+    let refused = records(&engine, "bot_medic_approach_unroutable");
+    assert_eq!(refused.len(), 1);
+    assert_eq!(refused[0]["reason"], "navmesh_component");
+    // The pair is not tried again during this downed life.
+    plan_tick(&mut engine, 1050);
+    plan_tick(&mut engine, 9000);
+    assert_eq!(records(&engine, "bot_medic_approach_unroutable").len(), 1);
+}
+
+#[test]
+fn the_medic_and_the_revived_bot_resume_their_objective_tasks() {
+    let slots = [(A, SA, 45., 60.), (A, SA, 60., 60.)];
+    let mut engine = world_with(&slots, &[(45., 60.)], Some((110., 110.)));
+    let (medic, patient) = (bot_at(&engine, 45., 60.), bot_at(&engine, 60., 60.));
+    plan_tick(&mut engine, 500);
+    let objective = |engine: &Engine<Vec<u8>>, id: u16| {
+        let task = &engine.bot_registry.bots[&id].task;
+        (task.objective, task.role_goal)
+    };
+    let (medic_task, patient_task) = (objective(&engine, medic), objective(&engine, patient));
+    assert!(medic_task.0.is_some() && patient_task.0.is_some());
+    down(&mut engine, patient, at(600));
+    plan_tick(&mut engine, 1000);
+    assert!(approach(&engine, medic).is_some());
+    assert_eq!(
+        objective(&engine, medic),
+        medic_task,
+        "kept while approaching"
+    );
+    place(&mut engine, medic, 58., 60.);
+    plan_tick(&mut engine, 4000);
+    engine.tick_bot_healing(at(4050), 1).unwrap();
+    assert!(engine.bot_registry.bots[&patient].downed.is_none());
+    assert_eq!(
+        objective(&engine, patient).0,
+        patient_task.0,
+        "the revived bot resumes"
+    );
+    plan_tick(&mut engine, 4100);
+    assert_eq!(ended(&engine), ["patient_revived"]);
+    assert_eq!(
+        objective(&engine, medic).0,
+        medic_task.0,
+        "the medic resumes"
+    );
+}
