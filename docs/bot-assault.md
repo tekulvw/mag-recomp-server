@@ -100,8 +100,8 @@ The population file's `assault` object. Omitted fields use these defaults:
 
 ```json
 "assault": {"enabled": true, "game_types": [2], "hold_radius_m": [2.5, 7.0],
-  "stage_hold_squads": 1, "breach_reserve_squads": 1, "rally_back_m": 35.0, "rally_radius_m": 12.0,
-  "rally_share": 0.6, "rally_wait_ms": 20000}
+  "stage_hold_squads": 1, "breach_reserve_squads": 1, "rally_back_m": 35.0,
+  "rally_radius_m": 12.0, "rally_share": 0.6, "rally_wait_ms": 20000}
 ```
 
 - `"enabled": false` restores the previous behaviour: attack roles, every
