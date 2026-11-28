@@ -253,19 +253,65 @@ pub(crate) fn respawn_for(
     loadout: &crate::replication::CharacterLoadout,
     profile: crate::wire_profile::WireProfile,
 ) -> Result<Vec<u8>, &'static str> {
+    respawn_in_state(
+        object_index,
+        sequence,
+        timestamp_ms,
+        position,
+        crate::replication::CharacterState {
+            state: 1,
+            stance: 0,
+            user_data: [0; 3],
+        },
+        0,
+        loadout,
+        profile,
+    )
+}
+
+/// A respawn under a parachute: the parachute state, airborne `position`
+/// and the drop zone's parachute `yaw`.
+pub(crate) fn airborne_respawn_for(
+    object_index: u16,
+    sequence: u32,
+    timestamp_ms: u32,
+    position: crate::replication::CharacterPosition,
+    yaw: u16,
+    loadout: &crate::replication::CharacterLoadout,
+    profile: crate::wire_profile::WireProfile,
+) -> Result<Vec<u8>, &'static str> {
+    respawn_in_state(
+        object_index,
+        sequence,
+        timestamp_ms,
+        position,
+        crate::bot_parachute::parachute_state(),
+        yaw,
+        loadout,
+        profile,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn respawn_in_state(
+    object_index: u16,
+    sequence: u32,
+    timestamp_ms: u32,
+    position: crate::replication::CharacterPosition,
+    state: crate::replication::CharacterState,
+    yaw: u16,
+    loadout: &crate::replication::CharacterLoadout,
+    profile: crate::wire_profile::WireProfile,
+) -> Result<Vec<u8>, &'static str> {
     use crate::replication::*;
     CharacterRespawn {
         sequence,
         timestamp_ms,
         object_index,
-        state: CharacterState {
-            state: 1,
-            stance: 0,
-            user_data: [0; 3],
-        },
+        state,
         position,
         pitch: 127,
-        yaw: 0,
+        yaw,
         damage: CharacterDamage {
             last_location_and_type: 0,
             health_quarter_points: INITIAL_HEALTH_QUARTER_POINTS,

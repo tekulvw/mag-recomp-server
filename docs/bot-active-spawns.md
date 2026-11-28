@@ -180,10 +180,34 @@ population slot is the fallback.
 
 ## Parachute points
 
-The server has no airborne descent model for bot bodies. Bots arrive landed on
-the first supporting surface below each authored drop-line position (the line
-human parachutists are spaced along), then on a small ring around the first
-landing.
+A bot's landing spots are the first supporting surface below each authored
+drop-line position (the line human parachutists are spaced along), then a
+small ring around the first landing.
+
+A bot life that arrives at a drop zone comes down under its parachute, as a
+human does (`gameplay/src/bot_parachute.rs`):
+
+- Its respawn carries character state 17 (the state of a human parachute
+  respawn) and the drop zone's parachute yaw. Its position is straight above
+  its landing spot, at the drop zone's authored airborne height.
+- It descends at a steady 6.4 m/s. Human drops in live Domination came down
+  39-41 m in 5.8-6.9 s (5.9-6.7 m/s). Every 250 ms it publishes its height
+  to the recipients that hold its snapshot. A recipient that takes its
+  snapshot mid-descent (a joiner, or one waiting for a paced snapshot batch)
+  gets state 17 and the current height.
+- When the descent time is up it publishes standing state 1 on its landing
+  spot, and its life goes on from there.
+- While in the air it does not walk, fire, operate objectives, take cover or
+  react to threats. Other bots neither see nor aim at it. Its body is reserved
+  at its landing spot from the start, so no other life lands there. Damage
+  still applies. A bot hit in the air goes down or dies on its landing spot,
+  and its next life at an open drop zone descends again.
+- The descent is vertical: bots do not steer the way human parachutists drift
+  forward. A drop zone less than 1 m above the landing spot is arrived at
+  standing.
+
+`bot_respawn` adds `descent_ms`, the time to touchdown, and
+`bot_parachute_landed` (`position`, `descent_ms`) marks the touchdown.
 
 ## Scope
 

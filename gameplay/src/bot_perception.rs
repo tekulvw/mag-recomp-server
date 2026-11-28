@@ -988,7 +988,9 @@ impl<W: Write> Engine<W> {
             let Some(r) = bot.target.runtime else {
                 continue;
             };
-            if bot.health == 0 || matches!(r.phase, BotPhase::Dead) {
+            // Under its parachute a bot neither looks out nor is seen where
+            // its body will land (bot_parachute).
+            if bot.health == 0 || matches!(r.phase, BotPhase::Dead) || bot.descent.is_some() {
                 continue;
             }
             live.insert(id);
