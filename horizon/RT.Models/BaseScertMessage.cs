@@ -240,7 +240,7 @@ namespace RT.Models
                 }
                 else
                 {
-                    Logger.Error($"Unable to decrypt {id}, HASH:{BitConverter.ToString(hash)} DATA:{BitConverter.ToString(messageBuffer).Replace("-", "")}");
+                    Logger.Error($"Unable to decrypt {id}: length={messageBuffer.Length}");
                 }
             }
             else
@@ -271,8 +271,7 @@ namespace RT.Models
                     }
                     catch (Exception e)
                     {
-                        Console.WriteLine($"Error deserializing {id} {BitConverter.ToString(plain)}");
-                        Console.WriteLine(e);
+                        Console.WriteLine($"Error deserializing {id}: length={plain.Length} error={e.GetType().Name}");
                     }
                 }
             }

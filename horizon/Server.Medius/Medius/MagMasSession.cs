@@ -10,7 +10,8 @@ namespace Server.Medius
     public sealed class MagMasSession : IMagPortalSession
     {
         public enum SessionState { AwaitingHello, ProtocolInfoSent, ProtocolAcknowledged, LocalDevelopmentAuthenticated, CharacterCreated, AccountLoginSent, CharacterDataSent }
-        public SessionState State { get; private set; } = SessionState.AwaitingHello;
+        private volatile SessionState _state = SessionState.AwaitingHello;
+        public SessionState State { get => _state; private set => _state = value; }
         public bool IsEstablished => State != SessionState.AwaitingHello;
         public bool DevelopmentAuthEnabled { get; set; } = false;
         public bool CharacterDataEnabled { get; set; }
@@ -20,6 +21,9 @@ namespace Server.Medius
         public LocalCharacterStore CharacterStore { get; set; }
         public string StorageStatus { get; private set; } = "inactive";
         public string AuthenticatedAccount { get; private set; }
+        public string AuthenticatedOnlineId { get; private set; }
+        /// <summary>Only the connection handler may deliver this proof; do not log it.</summary>
+        public string ConsoleLinkCode { get; private set; }
         /// <summary>Portal tickets in required mode; null keeps the development identity policy.</summary>
         public MagPortalTicketPolicy PortalTickets { get; set; }
         /// <summary>Portal account ID of a ticket-authenticated session; 0 otherwise.</summary>
@@ -30,7 +34,7 @@ namespace Server.Medius
         private readonly MagPortalTicketAssembly _portalTicket = new MagPortalTicketAssembly();
         /// <summary>Idle limit for portal account liveness; MAS.cs sets the application's client timeout.</summary>
         public int PortalLiveTimeoutSeconds { get; set; } = 30;
-        private bool _portalSessionEnded;
+        private volatile bool _portalSessionEnded;
         public bool IsPortalSessionLive(DateTime now) =>
             !_portalSessionEnded && !IsExpired(now, PortalLiveTimeoutSeconds);
         /// <summary>The connection closed: free its portal account for the next sign-in.</summary>
@@ -42,20 +46,21 @@ namespace Server.Medius
         // Portal tickets replace the development identity check, not the local account stack behind it.
         private bool AccountAuthEnabled => DevelopmentAuthEnabled || PortalTickets != null;
         private uint _selectedCharacterId;
-        private DateTime _lastActivityUtc;
+        private readonly MagSessionActivity _activity = new MagSessionActivity();
 
         public void ObserveActivity(DateTime now)
         {
-            if (IsEstablished) _lastActivityUtc = now;
+            _activity.Observe(now);
         }
 
         public bool IsExpired(DateTime now, int timeoutSeconds) =>
-            IsEstablished && (now - _lastActivityUtc).TotalSeconds > timeoutSeconds;
+            IsEstablished && _activity.IsExpired(now, timeoutSeconds);
 
         public IReadOnlyList<RT_MSG_SERVER_PLUGIN_TO_APP> HandleMany(bool enabled, int applicationId,
             RT_MSG_CLIENT_APP_TO_PLUGIN envelope, DateTime now)
         {
             PortalTicketRefusal = null;
+            ConsoleLinkCode = null;
             if (!enabled || !MagPluginRouting.IsSelectedApplication(applicationId) || !envelope.IsValid ||
                 !MagPluginRouting.IsClientPluginId(applicationId, envelope.PluginId))
                 return Array.Empty<RT_MSG_SERVER_PLUGIN_TO_APP>();
@@ -73,6 +78,8 @@ namespace Server.Medius
                     ObserveActivity(now);
                     return Reply(applicationId, new MagKeepAlive());
                 case MagHello _ when State == SessionState.AwaitingHello:
+                    // Publish initial activity before volatile established state becomes visible to the tick.
+                    ObserveActivity(now);
                     State = SessionState.ProtocolInfoSent;
                     ObserveActivity(now);
                     return Reply(applicationId, new MagProtocolInfo { ProtocolVersion = Program.Settings.MagProtocolVersion, BuildNumber = 0 });
@@ -85,13 +92,14 @@ namespace Server.Medius
                         var outcome = PortalTickets.Authenticate(_portalTicket, request, this, now);
                         PortalTicketStatus = outcome.Reason.Code();
                         PortalTicketRefusal = outcome.RefusalLog();
+                        ConsoleLinkCode = outcome.LinkCode;
                         ObserveActivity(now);
                         if (!outcome.Accepted)
                         {
                             var refusal = MagPortalTicketPolicy.RefusalReply(request, outcome);
                             return refusal == null ? Array.Empty<RT_MSG_SERVER_PLUGIN_TO_APP>() : Reply(applicationId, refusal);
                         }
-                        AuthenticatedAccount = outcome.Account; PortalAccountId = outcome.AccountId;
+                        AuthenticatedAccount = outcome.Account; PortalAccountId = outcome.AccountId; AuthenticatedOnlineId = outcome.OnlineId;
                         State = SessionState.LocalDevelopmentAuthenticated;
                         return Reply(applicationId, request is MagRetailNpAuthenticateRequest
                             ? new MagRetailNpAuthenticateResponse { TransactionId = request.TransactionId, Success = true }
@@ -157,7 +165,7 @@ namespace Server.Medius
                     try
                     {
                         if (CharacterStore == null) throw new IOException("Character store unavailable.");
-                        var outcome = CharacterStore.CreateForAccount(request, AuthenticatedAccount); result = outcome.Result; StorageStatus = outcome.Reason;
+                        var outcome = CharacterStore.CreateForAccount(request, AuthenticatedAccount, AuthenticatedOnlineId); result = outcome.Result; StorageStatus = outcome.Reason;
                         if (result == MagNetResult.Success) State = SessionState.CharacterCreated;
                     }
                     catch (Exception e) when (e is IOException || e is InvalidDataException || e is UnauthorizedAccessException)

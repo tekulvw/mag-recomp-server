@@ -838,20 +838,43 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
-        "mode": {"enum": ["off", "required"]},
+        "mode": {"enum": ["off", "required", "dual"]},
         "audience": {"type": "string", "pattern": "^([a-z0-9.-]{1,63})?$"},
         "keys": {
           "type": "object",
           "propertyNames": {"pattern": "^(0|[1-9][0-9]?|1[0-9]{2}|2[0-4][0-9]|25[0-5])$"},
           "additionalProperties": {"type": "string", "pattern": "^[A-Za-z0-9+/]+={0,2}$", "maxLength": 255}
-        }
+        },
+        "sonyKeys": {
+          "type": "object",
+          "propertyNames": {"pattern": "^[0-9a-f]{8}$"},
+          "additionalProperties": {"type": "string", "pattern": "^[A-Za-z0-9+/]+={0,2}$"}
+        },
+        "sonyServices": {
+          "type": "array",
+          "items": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,24}$"}
+        },
+        "identityDatabaseSecret": {"type": "string", "maxLength": 253, "pattern": "^([a-z0-9]([-a-z0-9.]*[a-z0-9])?)?$"},
+        "identityDatabaseSecretKey": {"type": "string", "maxLength": 253, "pattern": "^[A-Za-z0-9._-]+$"}
       },
       "allOf": [
         {
-          "if": {"properties": {"mode": {"const": "required"}}, "required": ["mode"]},
+          "if": {"properties": {"mode": {"enum": ["required", "dual"]}}, "required": ["mode"]},
           "then": {
             "required": ["audience", "keys"],
             "properties": {"audience": {"minLength": 1}, "keys": {"minProperties": 1}}
+          }
+        },
+        {
+          "if": {"properties": {"mode": {"const": "dual"}}, "required": ["mode"]},
+          "then": {
+            "required": ["sonyKeys", "sonyServices", "identityDatabaseSecret", "identityDatabaseSecretKey"],
+            "properties": {
+              "sonyKeys": {"minProperties": 1},
+              "sonyServices": {"minItems": 1},
+              "identityDatabaseSecret": {"minLength": 1},
+              "identityDatabaseSecretKey": {"minLength": 1}
+            }
           }
         }
       ]

@@ -199,6 +199,16 @@ Test("portal ticket nonce use limit", PortalTicketChecks.Replay);
 Test("portal ticket one live session per account", PortalTicketChecks.LiveSessions);
 Test("portal ticket environment configuration", PortalTicketChecks.Configuration);
 Test("portal ticket MAS and MAPS sign-in, off mode unchanged", PortalTicketChecks.Sessions);
+Test("dual authentication configuration", DualAuthenticationChecks.Configuration);
+Test("dual authentication activity and immutable application binding", DualAuthenticationChecks.ActivityAndBinding);
+Test("dual authentication bounded off-tick work queue", AuthenticationQueueChecks.Run);
+Test("dual authentication credential diagnostics", DualAuthenticationChecks.CredentialDiagnostics);
+Test("dual authentication expiry after database waits", DualAuthenticationChecks.ExpiryAfterLookup);
+Test("dual authentication account admission", DualAuthenticationChecks.Policy);
+Test("dual authentication character identity", DualAuthenticationChecks.CharacterIdentity);
+Test("dual authentication prototype and retail wire sessions", DualAuthenticationChecks.WireSessions);
+Test("dual authentication PostgreSQL identity and proof contract", DualAuthenticationDatabaseChecks.Run);
+Test("Sony NP 2.1 signature and strict parser", PsnTicketChecks.Run);
 
 Test("bounded retail mode capacities", () =>
 {

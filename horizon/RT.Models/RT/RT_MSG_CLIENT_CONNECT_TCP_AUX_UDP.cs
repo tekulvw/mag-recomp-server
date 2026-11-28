@@ -76,8 +76,8 @@ namespace RT.Models
                 $"ARG1:{ARG1} " +
                 $"AppId:{AppId} " +
                 $"Key:{Key} " +
-                $"SessionKey:{SessionKey} " +
-                $"AccessToken:{AccessToken}";
+                $"SessionKey:redacted " +
+                $"AccessToken:redacted";
         }
     }
 }

@@ -16,6 +16,8 @@
 <p><a href="/friends">Friends</a>: add players, answer requests and block players.</p>
 <p><a href="/reports/new">Report a player</a> for cheating, harassment, griefing or an offensive name. <a href="/reports">Your reports</a> show whether a moderator has reviewed them.</p>
 
+<p><a href="/account/console">Console identity</a>: link or unlink your verified Sony identity.</p>
+
 <h2>Linked launchers</h2>
 {% if devices.is_empty() %}
 <p>None yet. In the MAG launcher, choose to link your account, then enter its code at <a href="/link">magtest.online/link</a>.</p>
@@ -35,7 +37,7 @@
 {% endif %}
 
 <h2>Delete your account</h2>
-<p>This removes your sign-in and linked launchers. Your player name stays reserved so nobody else can take over its characters.</p>
+<p>This removes your sign-in, linked launchers and console identity. Your player name stays reserved so nobody else can take over its characters.</p>
 <form method="post" action="/account/delete" class="stack">
   <input type="hidden" name="csrf" value="{{ csrf }}">
   <label>Type {% if let Some(name) = player_name %}<strong>{{ name }}</strong>{% else %}<strong>delete</strong>{% endif %} to confirm

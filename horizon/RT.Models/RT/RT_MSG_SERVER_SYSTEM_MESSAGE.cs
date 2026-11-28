@@ -17,6 +17,8 @@ namespace RT.Models
         public byte LanguageType;
         public bool EndOfMessage;
         public string Message;
+        /// <summary>Local logging policy only; not serialized.</summary>
+        public bool RedactMessage { get; set; }
 
         public override void Deserialize(Server.Common.Stream.MessageReader reader)
         {
@@ -44,7 +46,7 @@ namespace RT.Models
                 $"EncodingType:{EncodingType} " +
                 $"MediusLanguageType:{LanguageType} " +
                 $"EndOfMessage:{EndOfMessage} " +
-                $"Message:{Message}";
+                $"Message:{(RedactMessage ? "redacted" : Message)}";
         }
     }
 }

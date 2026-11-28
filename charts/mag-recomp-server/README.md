@@ -188,6 +188,39 @@ portalTickets:
     "1": <base64 SPKI from /api/v1/ticket-keys>
 ```
 
+`portalTickets.mode: dual` opts into both portal tickets and explicitly trusted Sony NP
+tickets linked to the same portal account. It requires the portal audience and keys above,
+plus all settings below. Sony key IDs must be exactly eight lowercase hexadecimal digits;
+service IDs are an exact allowlist of 1–24 ASCII letters, digits, `_` or `-`. No Sony
+key or retail service ID is included. Verify title-specific trust and the console acceptance
+gates in [docs/dual-authentication.md](../../docs/dual-authentication.md) before enabling it;
+this configuration alone does not establish real-console compatibility.
+
+```yaml
+portalTickets:
+  mode: dual
+  audience: play.example.test
+  keys:
+    "1": <base64 SPKI from /api/v1/ticket-keys>
+  sonyKeys:
+    "01234567": <base64 DER SPKI for an explicitly trusted Sony verification key>
+  sonyServices: [SYNTHETIC_SERVICE] # Replace with the verified title's NP service ID.
+  identityDatabaseSecret: portal-identity-db
+  identityDatabaseSecretKey: connectionString # Default Secret data key.
+```
+
+Create `identityDatabaseSecret` separately with an Npgsql connection string for the
+**portal database**, including the required TLS verification settings. The chart does not
+create or embed database credentials. It mounts only the selected Secret key read-only at
+`/identity-db/connection-string` in MAPS and main Medius, setting
+`MAG_IDENTITY_DB_CONNECTION_FILE` to that path. Both receive `MAG_PORTAL_TICKETS=dual`,
+`MAG_PSN_TICKET_KEYS` as comma-separated `key-id:base64-SPKI` entries and
+`MAG_PSN_SERVICE_IDS` as comma-separated service IDs. Gameplay workers and init containers
+receive no identity database mount or authentication environment. In `off` and `required`
+modes no Sony environment or identity database volume is added. Incomplete dual settings
+fail rendering even when schema validation is skipped. After rotating the connection
+string, bump `runtime.revision` to restart Medius because the connection file is read once.
+
 ## Optional internal admin API
 
 `adminApi.enabled: true` starts the authenticated character-maintenance API (see [docs/admin-cli.md](../../docs/admin-cli.md#admin-api)) in the main `medius` container only; MAPS never gets it. Create a Secret yourself holding a random secret of at least 32 bytes under `adminApi.secretKey` (default `admin-api-secret`), give the calling portal the same value, and name the Secret in `adminApi.existingSecret`. The chart mounts it read-only, sets `MAG_ADMIN_API_LISTEN=0.0.0.0:<port>` and `MAG_ADMIN_API_SECRET_FILE`, and adds a ClusterIP Service `<release>-mag-recomp-server-admin-api` exposing only `adminApi.port` (default 10490). A NetworkPolicy admits that port only from pods in namespaces matching `adminApi.allowedNamespaceSelector`, which is required. Because the policy selects the medius pods, it also opens every other TCP and UDP port to all sources as two port ranges per protocol around the admin port, so player traffic is unchanged on clusters that enforce NetworkPolicy, including game ports added to the Service outside this chart. Those ranges use NetworkPolicy `endPort`, which needs Kubernetes 1.25 or later and a CNI that implements it (Calico and Cilium do); on a CNI without `endPort` support, do not enable the admin API. The secret is read at startup; bump `runtime.revision` after rotating it. Never route the Service through a Gateway, Ingress or LoadBalancer.

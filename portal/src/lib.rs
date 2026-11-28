@@ -7,6 +7,8 @@
 pub mod admin;
 pub mod admin_web;
 pub mod config;
+pub mod console_links;
+pub mod console_links_web;
 pub mod db;
 pub mod game_admin;
 pub mod names;

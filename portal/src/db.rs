@@ -775,6 +775,7 @@ pub async fn cleanup(pool: &PgPool) -> sqlx::Result<u64> {
         "DELETE FROM login_flows WHERE expires_at <= now()",
         "DELETE FROM web_sessions WHERE expires_at <= now()",
         "DELETE FROM device_codes WHERE expires_at <= now()",
+        "DELETE FROM console_link_proofs WHERE expires_at <= now()",
     ] {
         removed += sqlx::query(sql).execute(pool).await?.rows_affected();
     }

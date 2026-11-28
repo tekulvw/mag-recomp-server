@@ -65,8 +65,8 @@ namespace RT.Models
                 $"UNK0:{UNK0:X2} " +
                 $"AppId:{AppId:X8} " +
                 $"Key:{Key}" +
-                $"SessionKey:{SessionKey}" +
-                $"AccessToken:{AccessToken}"
+                $"SessionKey:redacted" +
+                $"AccessToken:redacted"
                 ;
         }
     }

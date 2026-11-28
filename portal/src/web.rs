@@ -141,6 +141,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         )
         .merge(crate::admin_web::routes())
         .merge(crate::social_web::routes())
+        .merge(crate::console_links_web::routes())
         .merge(crate::player_reports_web::routes())
         .merge(crate::status::routes())
         .layer(axum::middleware::from_fn(failed_requests))
