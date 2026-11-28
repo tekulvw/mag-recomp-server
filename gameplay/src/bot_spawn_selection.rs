@@ -822,9 +822,16 @@ impl<W: Write> Engine<W> {
         points
     }
 
-    /// Queue the defender lane routes the population will ask for, while
-    /// humans wait for the first wave, so the first defender lives can already
-    /// use their forward points. At most once a second; never routes inline.
+    /// Queue the spawn routes the population will ask for, so lives at the
+    /// next wave can already use their forward points: defender lane routes
+    /// (also while humans wait for the first wave), and the point routes of
+    /// squads without ranked goals (attackers on their lane), for each point
+    /// their active-spawn order tries before the population slot (an open
+    /// parachute drop zone, a human leader's squad spawn). A structure gate
+    /// change clears these, so each pass queues them again. Asked for only
+    /// when a life spawns, a point route was still pending at every wave and
+    /// the bot fell back to its slot. At most once a second; never routes
+    /// inline.
     pub(crate) fn prefetch_bot_spawn_routes(
         &mut self,
         now: Duration,
@@ -861,7 +868,46 @@ impl<W: Write> Engine<W> {
             })
             .unwrap_or_default();
         let mut seen = std::collections::BTreeSet::new();
+        let mut ungoaled = std::collections::BTreeMap::new();
+        let mut point_homes = std::collections::BTreeSet::new();
         for (squad, home, position) in slots {
+            // A squad without goals takes the first point of its active-spawn
+            // order that qualifies, up to its population slot.
+            if point_homes.insert((squad, home))
+                && *ungoaled
+                    .entry(squad)
+                    .or_insert_with(|| self.bot_spawn_goals(squad).is_empty())
+            {
+                for index in self.bot_spawn_order(squad, home) {
+                    if index == home {
+                        break;
+                    }
+                    let route_key = SpawnRouteKey::Point(index, home);
+                    if self
+                        .bot_registry
+                        .spawn_qualification
+                        .contains_key(&(index, home))
+                        || self.bot_spawn_routes.pending.contains(&route_key)
+                    {
+                        continue;
+                    }
+                    if !self.bot_spawn_candidates_cached(index)
+                        && self.bot_registry.spawn_candidates.probes - probes_before
+                            >= SPAWN_PREFETCH_PROBES_PER_TICK
+                    {
+                        self.bot_spawn_routes.prefetch_resume = true;
+                        return Ok(());
+                    }
+                    // A point without placements is cached (and reported) when
+                    // a bot asks.
+                    if let Ok(job) = self.point_route_job(index, position) {
+                        let gates = self.bot_registry.spawn_route_gates;
+                        if self.bot_spawn_routes.queue(route_key, gates, job).is_err() {
+                            return Ok(());
+                        }
+                    }
+                }
+            }
             let Some(lane) = self.bot_defended_lane(squad) else {
                 continue;
             };
