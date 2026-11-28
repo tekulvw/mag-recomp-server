@@ -276,10 +276,28 @@ had already killed it, within one second, before bots could go down. Since bots
 go down, those rounds finish the downed bot. A round that arrives after the
 death is final stays refused, as it would be for any dead character.
 
-A downed character cannot fire, so its hits stay refused. One live incident
-showed a server-side down from bot fire, landing while the player was using a
-Domination objective, after which the player's client kept moving and firing
-its sidearm for 11 s. That points to the owner's client not entering its
-downed state. It needs a lab check: be downed by a bot while holding an
-objective interaction, and confirm whether the client shows the downed screen
-and stops sending hits.
+A downed character cannot fire, so its hits stay refused.
+
+## Releasing a hold while going down
+
+A client that goes down or dies while holding an objective interaction, such as
+a Domination or Sabotage capture hold, sends `Release` (`03ea` kind 4) on its
+own. The server already ends that hold when the holder's life is lost, so it
+acknowledges the release with the no-trigger sentinel (`Ack`, trigger `0xff`)
+and changes nothing else. The audit reason is
+`objective_release_after_life_loss`. The next objective tick rolls the
+objective back, as for any lost holder, and sends no exit handshake, because
+the holder has no interaction left to end.
+
+This fixes a live Domination incident. A bot downed a player who was holding a
+capture. The server published the down to that player (state 7, zero health,
+condition 2), and the client's next owner updates were downed ones. Then it
+sent `Release`, and the server refused it with a `Nak` because the actor was not
+on foot. Within the same second the client resumed sending positions. For the
+next 11 s it moved about 14 m and fired its sidearm at the bot that downed it.
+The server still held the player down, so every one of those hits was refused.
+
+A lab check should confirm the client side: be downed by a bot while holding a
+capture, and check that the client stays on the downed screen and sends no
+further hits. A living actor that is not in the game or not on foot still gets
+a `Nak` for a release.

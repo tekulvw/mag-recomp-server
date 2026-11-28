@@ -264,3 +264,40 @@ fn exit_hex() -> String {
         .encode(),
     )
 }
+
+#[test]
+fn a_capturer_downed_mid_hold_gets_its_own_release_acknowledged() {
+    // Live: a bot downed a human holding a Domination capture. Its client
+    // released the capture as it went down; a Nak to that release was
+    // followed by the client leaving its downed state while the server still
+    // held it down.
+    let mut e = three_human_fixture();
+    interact(&mut e, CAPTURE, Kind::Activate, 100).unwrap();
+    assert_eq!(state(&e), Some(ObjectiveState::Activating));
+    e.active.as_mut().unwrap().life = CharacterLife::Incapacitated {
+        generation: 1,
+        downed: incapacitation::Downed {
+            deadline: Duration::from_secs(30),
+            accumulated_damage_hp: 0.,
+        },
+    };
+    let reply = interact(&mut e, CAPTURE, Kind::Release, 105).unwrap();
+    let replies = interactions(&reply);
+    assert!(
+        replies.iter().any(|(to, packet)| to == CAPTURER
+            && *packet
+                == protocol::ObjectiveInteraction {
+                    target_object_id: 0x0c80_0000 | u32::from(CAPTURE),
+                    kind: Kind::Ack,
+                    actor_index: 0,
+                    trigger_index: u8::MAX,
+                }),
+        "{reply:?}"
+    );
+    assert!(!replies.iter().any(|(_, packet)| packet.kind == Kind::Nak));
+    // The server's own life-loss rule still ends the hold; a downed holder
+    // has no client interaction left to end with the exit handshake.
+    let ended = tick(&mut e, 110).unwrap();
+    assert_eq!(state(&e), Some(ObjectiveState::Deactivated));
+    assert!(exits(&ended).is_empty(), "{ended:?}");
+}
