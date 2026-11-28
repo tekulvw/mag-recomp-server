@@ -367,6 +367,7 @@ impl SpawnRoutes {
             let worker = std::thread::Builder::new()
                 .name("bot-spawn-routes".into())
                 .spawn(move || {
+                    crate::navmesh::lower_worker_priority();
                     for (key, gates, job) in inbox {
                         let mesh = job.mesh.clone();
                         let result = job.run();

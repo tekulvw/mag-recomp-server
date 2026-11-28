@@ -834,7 +834,10 @@ impl<W: Write> Engine<W> {
                         let (w, m) = (world.clone(), mesh.clone());
                         let job = std::thread::Builder::new()
                             .name(crate::JOINED_JOB_THREADS[0].into())
-                            .spawn(move || build_static(&w, &m))
+                            .spawn(move || {
+                                crate::navmesh::lower_worker_priority();
+                                build_static(&w, &m)
+                            })
                             .map_err(|_| "bot_cover_thread_unavailable")?;
                         if cfg!(test) {
                             while !job.is_finished() {
@@ -866,7 +869,10 @@ impl<W: Write> Engine<W> {
                     let k = snapshot.key();
                     let job = std::thread::Builder::new()
                         .name(crate::JOINED_JOB_THREADS[1].into())
-                        .spawn(move || build_structures(&w, &m, &snapshot))
+                        .spawn(move || {
+                            crate::navmesh::lower_worker_priority();
+                            build_structures(&w, &m, &snapshot)
+                        })
                         .map_err(|_| "bot_cover_thread_unavailable")?;
                     if cfg!(test) {
                         while !job.is_finished() {

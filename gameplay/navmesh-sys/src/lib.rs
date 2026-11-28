@@ -1,6 +1,11 @@
 //! Raw C ABI of `src/navmesh_bridge.cpp`, which wraps the unmodified Recast and
 //! Detour sources under `vendor/recastnavigation`. `build.rs` compiles both into
 //! the static `mag_navmesh` library. Use the safe API in `mag_gameplay::navmesh`.
+//!
+//! A loaded mesh (`mag_nav_load`) is read-only once loaded and may be shared
+//! by threads. Queries take a query context (`mag_nav_query_new`), which one
+//! thread uses at a time, and routes take an immutable gate set
+//! (`mag_nav_gates_new`, filled by `mag_nav_add_gate` before first use).
 
 use std::ffi::c_int;
 
@@ -24,9 +29,19 @@ unsafe extern "C" {
         min: *const f32,
         max: *const f32,
         mode: c_int,
-        node_limit: c_int,
     ) -> *mut std::ffi::c_void;
     pub fn mag_nav_destroy(handle: *mut std::ffi::c_void);
+    /// A query context over a loaded mesh, which must outlive it. Each
+    /// context holds its own search state; use one from one thread at a time.
+    pub fn mag_nav_query_new(
+        mesh: *const std::ffi::c_void,
+        node_limit: c_int,
+    ) -> *mut std::ffi::c_void;
+    pub fn mag_nav_query_free(query: *mut std::ffi::c_void);
+    /// Bytes Detour allocates for one query context of `node_limit` nodes.
+    pub fn mag_nav_query_bytes(node_limit: c_int) -> usize;
+    pub fn mag_nav_gates_new() -> *mut std::ffi::c_void;
+    pub fn mag_nav_gates_free(gates: *mut std::ffi::c_void);
     pub fn mag_nav_tile_stats(
         handle: *const std::ffi::c_void,
         occupied: *mut c_int,
@@ -34,6 +49,7 @@ unsafe extern "C" {
     );
     pub fn mag_nav_route(
         handle: *mut std::ffi::c_void,
+        gates: *const std::ffi::c_void,
         start: *const f32,
         goal: *const f32,
         radius: f32,
@@ -71,10 +87,9 @@ unsafe extern "C" {
         count: c_int,
         y: *mut f32,
     );
-    pub fn mag_nav_clear_gates(handle: *mut std::ffi::c_void);
     #[allow(clippy::too_many_arguments)]
     pub fn mag_nav_add_gate(
-        handle: *mut std::ffi::c_void,
+        gates: *mut std::ffi::c_void,
         poly: u64,
         ox: f32,
         oz: f32,

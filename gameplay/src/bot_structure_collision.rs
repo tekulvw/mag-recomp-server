@@ -497,6 +497,7 @@ fn start_analysis(
     let job = std::thread::Builder::new()
         .name(crate::JOINED_JOB_THREADS[2].into())
         .spawn(move || {
+            crate::navmesh::lower_worker_priority();
             let began = std::time::Instant::now();
             let interiors_analysed = analyse_interiors(&snapshot);
             let (gated_polygons, reused_polygons, gate_error) = match &mesh {

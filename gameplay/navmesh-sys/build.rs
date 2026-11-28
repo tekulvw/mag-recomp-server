@@ -13,6 +13,9 @@ fn main() {
         sources.extend(entries);
     }
     let compiler = env::var("CXX").unwrap_or_else(|_| "c++".into());
+    // Extra compiler flags, for example `-fsanitize=thread` for a sanitizer
+    // build of the tests; none by default.
+    let extra = env::var("MAG_NAVMESH_CXXFLAGS").unwrap_or_default();
     let mut objects = Vec::new();
     for (i, source) in sources.iter().enumerate() {
         let object = out.join(format!("navmesh_{i}.o"));
@@ -30,6 +33,7 @@ fn main() {
                     "-Ivendor/recastnavigation/Detour/Include",
                     "-c"
                 ])
+                .args(extra.split_whitespace())
                 .arg(source)
                 .arg("-o")
                 .arg(&object)
@@ -61,5 +65,6 @@ fn main() {
         }
     );
     println!("cargo:rerun-if-changed=src/navmesh_bridge.cpp");
+    println!("cargo:rerun-if-env-changed=MAG_NAVMESH_CXXFLAGS");
     println!("cargo:rerun-if-changed=vendor/recastnavigation");
 }

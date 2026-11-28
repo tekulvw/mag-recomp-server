@@ -6,6 +6,13 @@ fn mesh() -> Arc<NavMesh> {
     Arc::new(super::goal_tests::stack())
 }
 
+/// The mesh with the one shared query context of [`SHARED_QUERY_ENV`].
+fn shared_mesh() -> Arc<NavMesh> {
+    let mut mesh = super::goal_tests::stack();
+    mesh.share_one_query();
+    Arc::new(mesh)
+}
+
 /// Route on another thread; returns when it finished.
 fn background_route(mesh: &Arc<NavMesh>) -> mpsc::Receiver<Instant> {
     let (done, finished) = mpsc::channel();
@@ -19,8 +26,41 @@ fn background_route(mesh: &Arc<NavMesh>) -> mpsc::Receiver<Instant> {
 }
 
 #[test]
-fn a_background_query_waits_for_the_world_tick_that_is_running() {
+fn a_query_runs_while_another_thread_holds_a_query_context() {
     let mesh = mesh();
+    // As a worker's long search would.
+    let busy = mesh.lock_native().unwrap();
+    background_route(&mesh)
+        .recv_timeout(Duration::from_secs(30))
+        .expect("the query waited for the other context");
+    drop(busy);
+    assert_eq!(mesh.query_contexts().0, 2);
+}
+
+#[test]
+fn a_background_query_does_not_wait_for_the_world_tick() {
+    let mesh = mesh();
+    let _tick = mesh.foreground();
+    let began = Instant::now();
+    let at = background_route(&mesh).recv().unwrap();
+    assert!(at.duration_since(began) < BACKGROUND_WAIT_LIMIT);
+}
+
+#[test]
+fn idle_query_contexts_are_reused() {
+    let mesh = mesh();
+    for _ in 0..4 {
+        background_route(&mesh).recv().unwrap();
+    }
+    let (made, bytes) = mesh.query_contexts();
+    assert_eq!(made, 1);
+    // 16,384 search nodes: about 0.6 MiB of Detour state per context.
+    assert!((256 << 10..2 << 20).contains(&bytes), "{bytes}");
+}
+
+#[test]
+fn a_background_query_waits_for_the_world_tick_that_is_running() {
+    let mesh = shared_mesh();
     let tick = mesh.foreground();
     let finished = background_route(&mesh);
     // The tick's own queries go straight through.
@@ -38,7 +78,7 @@ fn a_background_query_waits_for_the_world_tick_that_is_running() {
 
 #[test]
 fn a_background_query_runs_at_once_between_ticks() {
-    let mesh = mesh();
+    let mesh = shared_mesh();
     drop(mesh.foreground());
     let began = Instant::now();
     background_route(&mesh).recv().unwrap();
@@ -47,7 +87,7 @@ fn a_background_query_runs_at_once_between_ticks() {
 
 #[test]
 fn a_world_that_never_stops_ticking_cannot_starve_background_queries() {
-    let mesh = mesh();
+    let mesh = shared_mesh();
     let _tick = mesh.foreground();
     let began = Instant::now();
     let at = background_route(&mesh).recv().unwrap();
@@ -56,7 +96,7 @@ fn a_world_that_never_stops_ticking_cannot_starve_background_queries() {
 
 #[test]
 fn the_guard_restores_the_thread_and_nests() {
-    let mesh = mesh();
+    let mesh = shared_mesh();
     let other = super::goal_tests::stack();
     let outer = mesh.foreground();
     {

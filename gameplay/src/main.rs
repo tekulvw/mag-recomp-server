@@ -2332,6 +2332,10 @@ fn run(args: impl IntoIterator<Item = String>) -> io::Result<()> {
             }
             let mut summary = serde_json::to_value(&report).map_err(io::Error::other)?;
             summary["event"] = "headless_sim_summary".into();
+            if let Some((contexts, bytes)) = engine.navmesh_query_contexts() {
+                summary["navmesh_query_contexts"] = contexts.into();
+                summary["navmesh_query_context_bytes"] = bytes.into();
+            }
             eprintln!("{summary}");
             eprintln!(
                 "{}",

@@ -33,9 +33,11 @@ struct StructureGate {
     std::vector<unsigned char> labels;
     std::map<dtPolyRef, std::pair<uint64_t, uint64_t>> links;
 };
-struct MagNav {
+typedef std::map<dtPolyRef, StructureGate> GateMap;
+// The loaded mesh and the tables derived from it. Only `mag_nav_load` writes
+// it; afterwards queries only read it, so every query context shares one.
+struct MagNavMesh {
     dtNavMesh* mesh;
-    dtNavMeshQuery* query;
     std::map<dtPolyRef,int> component;
     bool reference;
     bool component_partition_separates_links;
@@ -45,8 +47,26 @@ struct MagNav {
     std::vector<int> poly_cluster;
     std::vector<int> cluster_portals;
     std::vector<StagePortal> portals;
-    std::map<dtPolyRef, StructureGate> gates;
-    ~MagNav() { dtFreeNavMeshQuery(query); dtFreeNavMesh(mesh); }
+    ~MagNavMesh() { dtFreeNavMesh(mesh); }
+};
+// One set of structure gates: built by `mag_nav_add_gate` on one thread,
+// then only read by the routes it is passed to.
+struct MagNavGates {
+    GateMap gates;
+};
+static const GateMap& no_gates() {
+    static const GateMap empty;
+    return empty;
+}
+// One query context: a shared mesh plus the search state (Detour's node
+// pools and open list) of the one thread using it at a time.
+struct MagNav {
+    const MagNavMesh* core;
+    const dtNavMesh* mesh;
+    dtNavMeshQuery* query;
+    // The gates of the route in progress; no gates outside `mag_nav_route`.
+    const GateMap* gates;
+    ~MagNav() { dtFreeNavMeshQuery(query); }
 };
 struct BakeObjects {
     rcHeightfield* hf = nullptr;
@@ -148,7 +168,7 @@ static void select_tile_faces(const std::vector<BoundsXZ>& bounds, const int* tr
 // query pool holds. The hierarchy below plans a coarse order of tile clusters
 // first and then searches the polygon corridor in bounded pieces between
 // crossings on that order. Every piece is an ordinary complete Detour path.
-static int cluster_of(const MagNav* h, dtPolyRef ref) {
+static int cluster_of(const MagNavMesh* h, dtPolyRef ref) {
     unsigned int salt = 0, tile = 0, poly = 0;
     h->mesh->decodePolyId(ref, salt, tile, poly);
     if (tile >= h->tile_offset.size() || h->tile_offset[tile] < 0) return -1;
@@ -180,7 +200,7 @@ static float distance3(const float* a, const float* b) {
     const float dx = b[0] - a[0], dy = b[1] - a[1], dz = b[2] - a[2];
     return std::sqrt(dx * dx + dy * dy + dz * dz);
 }
-static bool build_stages(MagNav* h) {
+static bool build_stages(MagNavMesh* h) {
     const dtNavMesh* mesh = h->mesh;
     const int max_tiles = mesh->getMaxTiles();
     h->tile_offset.assign(max_tiles, -1);
@@ -266,7 +286,7 @@ static bool build_stages(MagNav* h) {
 }
 // Least-cost order of portals from the start cluster to the goal cluster,
 // costing straight lines between consecutive crossing points.
-static bool coarse_route(const MagNav* h, int start_cluster, const float* start,
+static bool coarse_route(const MagNavMesh* h, int start_cluster, const float* start,
                          int goal_cluster, const float* goal, std::vector<int>& route) {
     route.clear();
     const int n = static_cast<int>(h->portals.size());
@@ -335,13 +355,13 @@ static int staged_corridor(MagNav* h, const dtQueryFilter& filter, dtPolyRef sta
                            const float* start, const float* goal, int node_budget,
                            std::vector<dtPolyRef>& corridor, int* nodes, int* stages) {
     corridor.clear();
-    const int start_cluster = cluster_of(h, start_ref), goal_cluster = cluster_of(h, goal_ref);
+    const int start_cluster = cluster_of(h->core, start_ref), goal_cluster = cluster_of(h->core, goal_ref);
     std::vector<int> coarse;
     if (start_cluster < 0 || goal_cluster < 0 || start_cluster == goal_cluster
-        || !coarse_route(h, start_cluster, start, goal_cluster, goal, coarse)) return 3;
+        || !coarse_route(h->core, start_cluster, start, goal_cluster, goal, coarse)) return 3;
     const int targets = static_cast<int>(coarse.size()) + 1;
-    const auto target_ref = [&](int k) { return k + 1 == targets ? goal_ref : h->portals[coarse[k]].to_ref; };
-    const auto target_point = [&](int k) { return k + 1 == targets ? goal : h->portals[coarse[k]].point; };
+    const auto target_ref = [&](int k) { return k + 1 == targets ? goal_ref : h->core->portals[coarse[k]].to_ref; };
+    const auto target_point = [&](int k) { return k + 1 == targets ? goal : h->core->portals[coarse[k]].point; };
     std::vector<float> along(targets, 0.f);
     for (int k = 0; k < targets; ++k)
         along[k] = (k ? along[k - 1] : 0.f) + distance3(k ? target_point(k - 1) : start, target_point(k));
@@ -452,8 +472,8 @@ static uint64_t gate_point_regions(const StructureGate& g, const float* p) {
 // the exit; a relaxed search leaves that to `gate_tracked_violation`.
 static bool gate_passes(const MagNav* h, dtPolyRef prev, dtPolyRef cur, dtPolyRef next,
                         const float* pa, const float* pb, bool relaxed = false) {
-    const auto found = h->gates.find(cur);
-    if (found == h->gates.end()) return true;
+    const auto found = h->gates->find(cur);
+    if (found == h->gates->end()) return true;
     const StructureGate& g = found->second;
     const auto side = [&](dtPolyRef ref, const float* point, bool* ambiguous_through, uint64_t* through) {
         *ambiguous_through = false; *through = 0;
@@ -489,7 +509,7 @@ public:
                   const dtPolyRef nextRef, const dtMeshTile* nextTile, const dtPoly* nextPoly) const override {
         float cost = dtQueryFilter::getCost(pa, pb, prevRef, prevTile, prevPoly, curRef, curTile, curPoly,
                                             nextRef, nextTile, nextPoly);
-        if (enabled && !h->gates.empty()
+        if (enabled && !h->gates->empty()
             && (!gate_passes(h, prevRef, curRef, nextRef, pa, pb, relaxed)
                 || (refused && std::find(refused->begin(), refused->end(),
                                          std::array<dtPolyRef, 3>{prevRef, curRef, nextRef}) != refused->end())))
@@ -505,7 +525,7 @@ private:
 // First corridor index whose crossing a standing structure seals, or -1.
 static int gate_violation(const MagNav* h, const unsigned long long* refs, int count,
                           const float* start, const float* goal) {
-    if (h->gates.empty()) return -1;
+    if (h->gates->empty()) return -1;
     for (int i = 0; i < count; ++i) {
         const dtPolyRef prev = i ? refs[i - 1] : 0, next = i + 1 < count ? refs[i + 1] : 0;
         if (!gate_passes(h, prev, refs[i], next, start, goal)) return i;
@@ -557,11 +577,11 @@ static int gate_tracked_violation(const MagNav* h, const unsigned long long* ref
                                   const float* start, const float* goal, const float* target = nullptr,
                                   float radius = 0.f, float* arrival = nullptr, bool* moved = nullptr) {
     if (moved) *moved = false;
-    if (h->gates.empty() || count <= 0) return -1;
+    if (h->gates->empty() || count <= 0) return -1;
     constexpr uint64_t All = ~uint64_t(0);
     const auto gate_of = [&](dtPolyRef ref) -> const StructureGate* {
-        const auto found = h->gates.find(ref);
-        return found == h->gates.end() ? nullptr : &found->second;
+        const auto found = h->gates->find(ref);
+        return found == h->gates->end() ? nullptr : &found->second;
     };
     const auto link_regions = [](const StructureGate& g, dtPolyRef neighbour) {
         const auto link = g.links.find(neighbour);
@@ -615,8 +635,8 @@ static int gate_tracked_violation(const MagNav* h, const unsigned long long* ref
 static bool gate_endpoint(const MagNav* h, dtPolyRef prev, dtPolyRef ref, const float* start,
                           const float* goal, float* out) {
     if (dtStatusFailed(h->query->closestPointOnPoly(ref, goal, out, nullptr))) return false;
-    const auto found = h->gates.find(ref);
-    if (found == h->gates.end()) return true;
+    const auto found = h->gates->find(ref);
+    if (found == h->gates->end()) return true;
     const StructureGate& g = found->second;
     uint64_t entry = ~uint64_t(0);
     if (!prev) entry = gate_point_regions(g, start);
@@ -747,15 +767,15 @@ int mag_nav_bake(const float* verts,int nv,const int* tris,int nt,const float* m
     *output=static_cast<unsigned char*>(dtAlloc(bytes.size(),DT_ALLOC_PERM));if(!*output)return 3;
     std::memcpy(*output,bytes.data(),bytes.size());*size=bytes.size();return 0;
 }
-MagNav* mag_nav_load(const unsigned char* data,int size,const float* min,const float* max,
-                    int mode,int node_limit) {
+MagNavMesh* mag_nav_load(const unsigned char* data,int size,const float* min,const float* max,
+                    int mode) {
     ModeLimits limits;
     if (!mode_limits(mode, &limits)) return nullptr;
     const bool reference = limits.reference;
     const int tile_cap = limits.tile_cap;
     const int poly_cap = limits.poly_cap;
     const size_t byte_cap = limits.byte_cap;
-    if(size<4 || static_cast<size_t>(size)>byte_cap || node_limit<1 || node_limit>16384)return nullptr;
+    if(size<4 || static_cast<size_t>(size)>byte_cap)return nullptr;
     uint32_t magic;std::memcpy(&magic,data,4);const bool tiled=magic==BUNDLE_MAGIC;
     if (mode!=0 && !tiled) return nullptr;
     std::vector<std::pair<const unsigned char*,int>> tiles;
@@ -785,15 +805,13 @@ MagNav* mag_nav_load(const unsigned char* data,int size,const float* min,const f
         dtMeshHeader h;std::memcpy(&h,data,sizeof(h));for(int k=0;k<3;++k)if(std::fabs(h.bmin[k]-min[k])>.002f || std::fabs(h.bmax[k]-(max[k]+(k==1?1.85f:0.f)))>.002f)return nullptr;
         tiles.push_back({data,size});
     }
-    MagNav* h=new(std::nothrow) MagNav{dtAllocNavMesh(),dtAllocNavMeshQuery(),{},reference,true};
-    if(!h || !h->mesh || !h->query){delete h;return nullptr;}
+    MagNavMesh* h=new(std::nothrow) MagNavMesh{dtAllocNavMesh(),{},reference,true,{},{},{},{}};
+    if(!h || !h->mesh){delete h;return nullptr;}
     if(tiled){dtNavMeshParams p{};rcVcopy(p.orig,min);p.tileWidth=p.tileHeight=bundle.width;p.maxTiles=tile_cap;p.maxPolys=poly_cap;if(dtStatusFailed(h->mesh->init(&p))){delete h;return nullptr;}}
     for(const auto& tile:tiles){unsigned char* copy=static_cast<unsigned char*>(dtAlloc(tile.second,DT_ALLOC_PERM));if(!copy){delete h;return nullptr;}std::memcpy(copy,tile.first,tile.second);
         dtStatus result=tiled?h->mesh->addTile(copy,tile.second,DT_TILE_FREE_DATA,0,nullptr):h->mesh->init(copy,tile.second,DT_TILE_FREE_DATA);
         if(dtStatusFailed(result)){dtFree(copy);delete h;return nullptr;}
     }
-    // Preserve the original runtime pool; legacy metadata incorrectly said 8192.
-    if(dtStatusFailed(h->query->init(h->mesh,node_limit))){delete h;return nullptr;}
     // Tile insertion and polygon iteration are deterministic, yielding stable labels.
     int label=0;
     for(int t=0;t<h->mesh->getMaxTiles();++t){const dtMeshTile* tile=static_cast<const dtNavMesh*>(h->mesh)->getTile(t);if(!tile->header)continue;
@@ -820,8 +838,26 @@ MagNav* mag_nav_load(const unsigned char* data,int size,const float* min,const f
     if(!reference && !build_stages(h)){delete h;return nullptr;}
     return h;
 }
-void mag_nav_destroy(MagNav* h) { delete h; }
-void mag_nav_tile_stats(const MagNav* h, int* occupied, int* max_polygons) {
+void mag_nav_destroy(MagNavMesh* h) { delete h; }
+// A query context over `core`, which must outlive it.
+MagNav* mag_nav_query_new(const MagNavMesh* core,int node_limit) {
+    // Preserve the original runtime pool; legacy metadata incorrectly said 8192.
+    if(!core || node_limit<1 || node_limit>16384)return nullptr;
+    MagNav* h=new(std::nothrow) MagNav{core,core->mesh,dtAllocNavMeshQuery(),&no_gates()};
+    if(!h || !h->query || dtStatusFailed(h->query->init(core->mesh,node_limit))){delete h;return nullptr;}
+    return h;
+}
+void mag_nav_query_free(MagNav* h) { delete h; }
+size_t mag_nav_query_bytes(int node_limit) {
+    // Detour's per-query allocations: the node pool (nodes, hash buckets and
+    // chains), the open list's heap and the 64-node tiny pool.
+    size_t buckets=1;while(buckets<static_cast<size_t>(node_limit/4))buckets<<=1;
+    return sizeof(dtNavMeshQuery)+static_cast<size_t>(node_limit)*(sizeof(dtNode)+sizeof(dtNodeIndex)+sizeof(dtNode*))
+        +buckets*sizeof(dtNodeIndex)+64*(sizeof(dtNode)+sizeof(dtNodeIndex))+32*sizeof(dtNodeIndex);
+}
+MagNavGates* mag_nav_gates_new() { return new(std::nothrow) MagNavGates; }
+void mag_nav_gates_free(MagNavGates* gates) { delete gates; }
+void mag_nav_tile_stats(const MagNavMesh* h, int* occupied, int* max_polygons) {
     *occupied = *max_polygons = 0;
     const dtNavMesh* mesh = h->mesh;
     for (int i = 0; i < mesh->getMaxTiles(); ++i) {
@@ -908,7 +944,7 @@ static int route_impl(MagNav* h,const float* start,const float* goal,float radiu
     struct Candidate { dtPolyRef ref;float p[3];float distance;bool reachable; };
     std::vector<Candidate> goals;
     for(const GoalPolygons::Hit& hit:candidates.hits) {
-        Candidate c{};c.ref=hit.ref;c.reachable=h->component.at(c.ref)==h->component.at(sr);
+        Candidate c{};c.ref=hit.ref;c.reachable=h->core->component.at(c.ref)==h->core->component.at(sr);
         rcVcopy(c.p,hit.p);c.distance=hit.distance;goals.push_back(c);
     }
     std::sort(goals.begin(),goals.end(),[](const Candidate& a,const Candidate& b){return a.reachable!=b.reachable ? a.reachable>b.reachable : a.distance==b.distance ? a.ref<b.ref : a.distance<b.distance;});
@@ -916,7 +952,7 @@ static int route_impl(MagNav* h,const float* start,const float* goal,float radiu
     const Candidate& selected = goals[0];
     const dtPolyRef gr = selected.ref;
     rcVcopy(projected_goal, selected.p);
-    if (h->reference && h->component_partition_separates_links && !selected.reachable) return 2;
+    if (h->core->reference && h->core->component_partition_separates_links && !selected.reachable) return 2;
 
     dtPolyRef path[1024];
     int count = 0;
@@ -924,15 +960,15 @@ static int route_impl(MagNav* h,const float* start,const float* goal,float radiu
                                                &filter, path, &count, 1024);
     if(dtStatusFailed(status)) return 6;
     *nodes = h->query->getNodePool()->getNodeCount();
-    if(!count) return h->reference ? 1 : 2;
-    if (h->reference && selected.reachable && dtStatusDetail(status, DT_OUT_OF_NODES)
+    if(!count) return h->core->reference ? 1 : 2;
+    if (h->core->reference && selected.reachable && dtStatusDetail(status, DT_OUT_OF_NODES)
         && dtStatusDetail(status, DT_PARTIAL_RESULT)
         && reverse_reference_route(h, filter, sr, gr, projected_start, projected_goal,
                                    points, point_count, refs, ref_count)) return 0;
     // A runtime route that ran out of nodes, or whose path outgrew the direct
     // search's 1,024 polygons, inside one walking component is retried in
     // stages. If that fails too, the direct partial result stands.
-    if (!h->reference && selected.reachable
+    if (!h->core->reference && selected.reachable
         && dtStatusDetail(status, DT_OUT_OF_NODES | DT_BUFFER_TOO_SMALL)) {
         if (staged_route(h, filter, sr, gr, projected_start, projected_goal, points, point_count,
                          refs, ref_count, nodes, stages) == 0) return 0;
@@ -948,7 +984,7 @@ static int route_impl(MagNav* h,const float* start,const float* goal,float radiu
     *ref_count=count;for(int i=0;i<count;++i) refs[i]=static_cast<unsigned long long>(path[i]);
     if(dtStatusDetail(status,DT_OUT_OF_NODES)) return 3;
     if(dtStatusDetail(straight,DT_BUFFER_TOO_SMALL)) return 1;
-    if(partial) return !h->reference && count==1 ? 2 : 1;
+    if(partial) return !h->core->reference && count==1 ? 2 : 1;
     return 0;
 }
 // Gated routes are first planned with a wall-crossed entry edge allowed on
@@ -960,14 +996,21 @@ static int route_impl(MagNav* h,const float* start,const float* goal,float radiu
 // entry regions, nearest the goal, as a partial route.
 // `gated` 0 plans on the static mesh alone (a start inside a structure's
 // enclosed room, which no opening leaves).
-int mag_nav_route(MagNav* h,const float* start,const float* goal,float radius,float* projected_start,float* projected_goal,
+int mag_nav_route(MagNav* h,const MagNavGates* gate_set,const float* start,const float* goal,float radius,
+                  float* projected_start,float* projected_goal,
                   float* points,int* point_count,unsigned long long* refs,int* ref_count,int* nodes,int* stages,int options) {
+    // The route reads `gate_set` (null: no gates) throughout and only it.
+    struct GateScope {
+        MagNav* h;
+        ~GateScope() { h->gates = &no_gates(); }
+    } scope{h};
+    h->gates = gate_set ? &gate_set->gates : &no_gates();
     // Bit 0: gate by the standing structures. Bit 1: a goal they wall off is
     // reached beside it (see `gate_tracked_violation`); callers that must
     // stand at the goal itself (an interaction range) leave it clear.
     const int gated=options&1;
     const bool beside=(options&2)!=0;
-    if(gated && !h->gates.empty()) {
+    if(gated && !h->gates->empty()) {
         std::vector<std::array<dtPolyRef,3>> refused;
         for(int attempt=0; attempt<RelaxedGateAttempts; ++attempt) {
             const int relaxed=route_impl(h,start,goal,radius,projected_start,projected_goal,points,point_count,refs,ref_count,
@@ -1052,9 +1095,8 @@ void mag_nav_poly_heights(MagNav* h,unsigned long long ref,const float* xz,int n
         y[i]=dtStatusSucceed(h->query->getPolyHeight(static_cast<dtPolyRef>(ref),p,&height))?height:NAN;
     }
 }
-void mag_nav_clear_gates(MagNav* h) { h->gates.clear(); }
 // Install one polygon's structure gate (see StructureGate). 0 on invalid input.
-int mag_nav_add_gate(MagNav* h,unsigned long long ref,float ox,float oz,float cell,int nx,int nz,
+int mag_nav_add_gate(MagNavGates* h,unsigned long long ref,float ox,float oz,float cell,int nx,int nz,
                      const unsigned char* labels,const unsigned long long* link_refs,
                      const unsigned long long* full,const unsigned long long* through,int link_count) {
     if(nx<1 || nz<1 || nx>512 || nz>512 || !(cell>0.f) || link_count<0 || link_count>64) return 0;
@@ -1069,14 +1111,14 @@ int mag_nav_component_id(MagNav* h,const float* position) {
     dtQueryFilter f;f.setIncludeFlags(1);const float e[3]={.75f,2.f,.75f};dtPolyRef ref=0;float p[3];
     if(dtStatusFailed(h->query->findNearestPoly(position,e,&f,&ref,p)) || !ref)return -1;
     if(std::hypot(p[0]-position[0],p[2]-position[2])>.15f)return -1;
-    return h->component.at(ref);
+    return h->core->component.at(ref);
 }
 // The nearest point of each walking component among `q`'s hits, in the order
 // Detour first reaches each component. More than 128 components keep the 128
 // nearest, still in that order.
 static void nearest_per_component(const MagNav* h,const GoalPolygons& q,int* components,float* points,int* count) {
     std::map<int,size_t> slot;std::vector<const GoalPolygons::Hit*> nearest;std::vector<int> found;
-    for(const GoalPolygons::Hit& hit:q.hits){const int component=h->component.at(hit.ref);
+    for(const GoalPolygons::Hit& hit:q.hits){const int component=h->core->component.at(hit.ref);
         const auto known=slot.emplace(component,nearest.size());
         if(known.second){nearest.push_back(&hit);found.push_back(component);}
         else if(hit.distance<nearest[known.first->second]->distance)nearest[known.first->second]=&hit;
@@ -1109,11 +1151,11 @@ int mag_nav_column_goals(MagNav* h,const float* goal,float radius,float height,i
 int mag_nav_component(MagNav* h,const float* start,const float* goal,float* closest,float* min,float* max,int* count,int* total) {
     dtQueryFilter f;f.setIncludeFlags(1);const float e[3]={.75f,2.f,.75f};dtPolyRef r=0;float ps[3];
     if(dtStatusFailed(h->query->findNearestPoly(start,e,&f,&r,ps)) || !r)return 0;
-    const int label=h->component.at(r);float best=1e30f;*count=0;*total=h->component.size();
+    const int label=h->core->component.at(r);float best=1e30f;*count=0;*total=h->core->component.size();
     for(int k=0;k<3;++k){min[k]=1e30f;max[k]=-1e30f;}
     for(int t=0;t<h->mesh->getMaxTiles();++t){const dtMeshTile* tile=static_cast<const dtNavMesh*>(h->mesh)->getTile(t);if(!tile->header)continue;
     const dtPolyRef base=h->mesh->getPolyRefBase(tile);
-    for(int i=0;i<tile->header->polyCount;++i)if(h->component.at(base|i)==label){
+    for(int i=0;i<tile->header->polyCount;++i)if(h->core->component.at(base|i)==label){
         ++*count;float p[3];if(!dtStatusFailed(h->query->closestPointOnPoly(base|i,goal,p,nullptr))){const float dx=p[0]-goal[0],dy=p[1]-goal[1],dz=p[2]-goal[2],distance=dx*dx+dy*dy+dz*dz;if(distance<best){best=distance;rcVcopy(closest,p);}}
         const dtPoly& poly=tile->polys[i];for(int j=0;j<poly.vertCount;++j)for(int k=0;k<3;++k){float v=tile->verts[poly.verts[j]*3+k];min[k]=std::min(min[k],v);max[k]=std::max(max[k],v);}
     }

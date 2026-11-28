@@ -1926,6 +1926,13 @@ impl<W: Write> Engine<W> {
         self.bind_movement_layers();
         self
     }
+    /// The navmesh's native query contexts so far and Detour's bytes for
+    /// each (see `NavMesh::query_contexts`).
+    pub fn navmesh_query_contexts(&self) -> Option<(usize, usize)> {
+        self.navmesh_world
+            .as_deref()
+            .map(navmesh::NavMesh::query_contexts)
+    }
     /// Bots move against the collision layers their navmesh was baked from.
     fn bind_movement_layers(&mut self) {
         if let Some(mesh) = &self.navmesh_world {
