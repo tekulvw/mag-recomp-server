@@ -77,6 +77,21 @@ pub(super) fn interaction<W: Write>(
                 plan.objective_world = Some(world);
             }
         }
+    } else if request.kind == Kind::Release
+        && ctx.active.entered_game
+        && matches!(
+            ctx.active.life,
+            CharacterLife::Incapacitated { .. } | CharacterLife::AwaitingRespawn { .. }
+        )
+    {
+        // A client that goes down or dies while holding an objective releases
+        // it itself. The server ends that hold on its own when the holder's
+        // life is lost, so acknowledge the release without changing anything.
+        // A Nak tells the client its release failed, and the live client then
+        // left its downed state and kept moving and firing while the server
+        // still held it down.
+        accepted = true;
+        reason = "objective_release_after_life_loss";
     } else {
         reason = "objective_actor_not_on_foot";
     }

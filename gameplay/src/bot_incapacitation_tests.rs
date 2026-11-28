@@ -663,3 +663,106 @@ fn a_kinetic_grenade_kills_outright_and_a_grenade_finishes_a_downed_bot() {
     assert_eq!(rewards(&engine, progression::RewardKind::EnemyKilled), 1);
     assert_eq!(rewards(&engine, progression::RewardKind::EnemyFinished), 1);
 }
+
+/// The audit of the last bullet hit the engine planned.
+fn last_bullet_hit(engine: &Engine<Vec<u8>>) -> Value {
+    records(engine, "event")
+        .into_iter()
+        .rev()
+        .find(|row| row["decoded"]["type"] == "bullet_hit")
+        .expect("a bullet hit audit")
+}
+
+#[test]
+fn the_next_round_of_a_burst_finishes_the_bot_it_downed() {
+    // The live burst class: one round takes the bot to 0 HP and the next
+    // round of the same burst lands 20 ms later. On a downed body it is
+    // finishing damage, not a refused hit.
+    let (mut engine, target) = shooting_range();
+    shoot(&mut engine, target, 1000);
+    assert!(is_downed(&engine, target));
+    shoot(&mut engine, target, 1020);
+    let row = last_bullet_hit(&engine);
+    assert_eq!(row["gameplay_denial"], Value::Null);
+    assert!(row["decoded"]["refusal"].is_null());
+    assert_eq!(
+        row["decoded"]["applied_damage"]["health_after_quarter_points"],
+        0
+    );
+    assert_eq!(
+        engine.bot_registry.bots[&target]
+            .downed
+            .unwrap()
+            .state
+            .accumulated_damage_hp,
+        40.
+    );
+}
+
+#[test]
+fn a_late_round_on_a_finished_bot_is_refused_and_says_how_long_it_has_been_dead() {
+    let (mut engine, target) = shooting_range();
+    for ms in [1000, 1100, 1200, 1300] {
+        shoot(&mut engine, target, ms);
+    }
+    assert!(!is_downed(&engine, target), "finished at 1300 ms");
+    let killed = rewards(&engine, progression::RewardKind::EnemyKilled);
+    let finished = rewards(&engine, progression::RewardKind::EnemyFinished);
+    shoot(&mut engine, target, 1350);
+    let row = last_bullet_hit(&engine);
+    assert_eq!(row["gameplay_denial"], "bullet_target_not_alive");
+    assert!(row["decoded"]["applied_damage"].is_null());
+    let refusal = &row["decoded"]["refusal"];
+    assert_eq!(refusal["code"], "bullet_target_not_alive");
+    assert_eq!(refusal["target"]["kind"], "bot");
+    assert_eq!(refusal["target"]["life"]["state"], "dead");
+    assert_eq!(refusal["target"]["life"]["dead_for_ms"], 50);
+    assert_eq!(refusal["shooter"]["life"]["state"], "alive");
+    assert_eq!(engine.bot_registry.bots[&target].health, 0);
+    assert_eq!(
+        rewards(&engine, progression::RewardKind::EnemyKilled),
+        killed
+    );
+    assert_eq!(
+        rewards(&engine, progression::RewardKind::EnemyFinished),
+        finished
+    );
+}
+
+#[test]
+fn a_downed_shooter_is_refused_and_the_audit_names_its_downed_life() {
+    // The live desync class: the server holds the shooter down while its
+    // client keeps firing. The hit stays refused (a downed character cannot
+    // fire) and the audit says so.
+    let (mut engine, target) = shooting_range();
+    engine.active.as_mut().unwrap().life = CharacterLife::Incapacitated {
+        generation: 4,
+        downed: incapacitation::Downed {
+            deadline: at(31_000),
+            accumulated_damage_hp: 0.,
+        },
+    };
+    shoot(&mut engine, target, 1000);
+    let row = last_bullet_hit(&engine);
+    assert_eq!(
+        row["gameplay_denial"],
+        "bullet_requires_living_armed_shooter"
+    );
+    let refusal = &row["decoded"]["refusal"];
+    assert_eq!(refusal["shooter"]["life"]["state"], "downed");
+    assert_eq!(refusal["shooter"]["life"]["bleeds_out_in_ms"], 30_000);
+    assert_eq!(refusal["shooter"]["life"]["expired"], false);
+    assert_eq!(refusal["shooter"]["mounted_seat"], Value::Null);
+    assert_eq!(refusal["target"]["life"]["state"], "alive");
+    assert_eq!(engine.bot_registry.bots[&target].health, 120);
+    assert!(!is_downed(&engine, target));
+}
+
+#[test]
+fn an_accepted_hit_carries_no_refusal() {
+    let (mut engine, target) = shooting_range();
+    shoot(&mut engine, target, 1000);
+    let row = last_bullet_hit(&engine);
+    assert_eq!(row["gameplay_denial"], Value::Null);
+    assert!(row["decoded"].get("refusal").is_none());
+}

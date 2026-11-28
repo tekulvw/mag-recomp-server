@@ -250,3 +250,54 @@ use the defaults:
 Whether the original client offers its revive prompt on a server-owned body
 has not been observed yet; it needs a lab check with a human medic who owns
 the resuscitation skill.
+
+## Refused bullet hits
+
+Hits are reported by the shooter's client. The hit message carries no shot or
+fire-event identifier, so every `bullet_hit` audit is marked
+`hit_authority: client_reported` and `ammo_authority:
+observed_only_no_fire_event`. Those two labels are the same on every hit. They
+do not explain a refusal. The refusal is the event's `gameplay_denial`. For the
+two life checks, the audit also has a `refusal` object that names the life
+behind it:
+
+- `bullet_target_not_alive`: the target has no life left to damage. For a bot,
+  `refusal.target.life` is `dead` with `dead_for_ms`, the time since its death
+  became final. A downed body is not refused: its hits are finishing damage. A
+  human target names its life the same way (`dead`, `awaiting_first_spawn`).
+- `bullet_requires_living_armed_shooter`: the server holds the shooter as not
+  in the game, not ready, downed or dead, or seated somewhere that cannot fire.
+  `refusal.shooter` gives its life (for a downed shooter, `bleeds_out_in_ms`
+  and `expired`), `mounted_seat`, `ground_seat` and `ground_gunner`.
+
+Live 0.18.0 hits refused for the target's life were all of one kind. They were
+the remaining rounds of a burst that reached a registry bot after another round
+had already killed it, within one second, before bots could go down. Since bots
+go down, those rounds finish the downed bot. A round that arrives after the
+death is final stays refused, as it would be for any dead character.
+
+A downed character cannot fire, so its hits stay refused.
+
+## Releasing a hold while going down
+
+A client that goes down or dies while holding an objective interaction, such as
+a Domination or Sabotage capture hold, sends `Release` (`03ea` kind 4) on its
+own. The server already ends that hold when the holder's life is lost, so it
+acknowledges the release with the no-trigger sentinel (`Ack`, trigger `0xff`)
+and changes nothing else. The audit reason is
+`objective_release_after_life_loss`. The next objective tick rolls the
+objective back, as for any lost holder, and sends no exit handshake, because
+the holder has no interaction left to end.
+
+This fixes a live Domination incident. A bot downed a player who was holding a
+capture. The server published the down to that player (state 7, zero health,
+condition 2), and the client's next owner updates were downed ones. Then it
+sent `Release`, and the server refused it with a `Nak` because the actor was not
+on foot. Within the same second the client resumed sending positions. For the
+next 11 s it moved about 14 m and fired its sidearm at the bot that downed it.
+The server still held the player down, so every one of those hits was refused.
+
+A lab check should confirm the client side: be downed by a bot while holding a
+capture, and check that the client stays on the downed screen and sends no
+further hits. A living actor that is not in the game or not on foot still gets
+a `Nak` for a release.

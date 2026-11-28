@@ -452,3 +452,57 @@ fn sabotage_defender_release_preserves_original_attacker_capture_reward_identity
     tick(&mut e, 140);
     assert_eq!(e.pending_reward_batch().len(), 2);
 }
+
+#[test]
+fn a_holder_that_goes_down_or_dies_gets_its_own_release_acknowledged() {
+    // A client that loses its life mid-hold sends Release itself. The server
+    // ends the hold on its own, so the release is acknowledged with the
+    // no-trigger sentinel instead of refused, and the objective still rolls
+    // back on the next tick.
+    let downed = CharacterLife::Incapacitated {
+        generation: 1,
+        downed: incapacitation::Downed {
+            deadline: Duration::from_secs(30),
+            accumulated_damage_hp: 0.,
+        },
+    };
+    for life in [downed, CharacterLife::AwaitingRespawn { generation: 1 }] {
+        let mut e = fixture();
+        activate(&mut e, 100);
+        assert_eq!(delta(&e, 10).state_actor.state, State::Activating);
+        e.active.as_mut().unwrap().life = life;
+        let reply = request(&mut e, 0, 10, Kind::Release, 105);
+        assert!(
+            reply
+                .iter()
+                .any(|m| m.payload_hex == "03ea0c80000a020000ff"),
+            "{life:?}: {reply:?}"
+        );
+        assert!(
+            !reply
+                .iter()
+                .any(|m| m.payload_hex.starts_with("03ea0c80000a03")),
+            "{life:?}: no Nak"
+        );
+        tick(&mut e, 106);
+        assert_eq!(
+            delta(&e, 10).state_actor.state,
+            State::Deactivated,
+            "{life:?}"
+        );
+    }
+}
+
+#[test]
+fn a_living_out_of_game_actor_release_is_still_refused() {
+    let mut e = fixture();
+    activate(&mut e, 100);
+    e.active.as_mut().unwrap().entered_game = false;
+    let reply = request(&mut e, 0, 10, Kind::Release, 105);
+    assert!(
+        reply
+            .iter()
+            .any(|m| m.payload_hex == "03ea0c80000a030000ff"),
+        "{reply:?}"
+    );
+}
