@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Project source-qualified Acquisition and Domination static resupply providers."""
+"""Project source-qualified Sabotage, Acquisition and Domination static resupply providers."""
 import argparse
 from collections import Counter
 import json
@@ -18,6 +18,7 @@ MAP_HELPERS = runpy.run_path(str(TOOLS / "retail_map_helpers.py"))
 NATIVE = runpy.run_path(str(TOOLS / "extract-retail-falling-damage.py"))
 require, sha = SHARED["require"], SHARED["sha"]
 RETAIL_SHA = NATIVE["SOURCES"]["retail"]
+RULES_ARCHIVE_SHA = NATIVE["SOURCES"]["archive"]
 DOM_SPAWN_BINDINGS_SHA = "7ef4dd3e613b001dd27bdbfae4140e9b320ca9e6f2eab6ef1c68e64c7f989918"
 SCOPE = "retail_fresh_successful_compiled_load"
 SUPPLY_CLASS = "SupplyPointObjectProperties"
@@ -34,6 +35,15 @@ class MapSource(NamedTuple):
 
 
 MAPS = {
+    "mag_cosmodrome_final": MapSource(0, 2,
+        "8157f5abc55ddd2ca9eaad3379e87ae909d0b8f7c9b08fa04f1f1e2d8018d96e",
+        "d336caea88351dda5f3204a34e64fdde8eabdf0532b3133e2338cdd150488f4b", 4558, 5),
+    "mag_kennicott_final": MapSource(0, 0,
+        "399a38f568f4cd4c9c1d787b8ebbe857506b807638dc19f7e2e893ef051332ec",
+        "f17814c8eea43f636541059c8eb910d3707ced53ff9d1cc87d0ad83300825b56", 3581, 4),
+    "mag_remote_comms_final": MapSource(0, 1,
+        "f066f00a74a58d36a531526f4216538300362d5f358a0f40c6b75f2edc226313",
+        "71f5dd11198a5d8d34055276a0fa031f8b8e833f2b8a6c6b9edb9fc4f3a1c888", 5787, 5),
     "mag_alaska_subpen_final": MapSource(1, 0,
         "fb0e9c12653dcecd9c6f444ec6c5a997aec7f99f481f7951065bf4b64a39f7a0",
         "b4c2cfe7db94901b98c10a11f1d57a52cfed4941e061196627b3a753a3fe3a7e", 8506, 10),
@@ -263,7 +273,14 @@ def validate_profile(spawn_raw, world_raw):
     require(source["map"] == map_name and source["level_archive_sha256"] == level.archive_sha
             and source["level_clv_sha256"] == level.clv_sha,
             f"spawn catalog source must match supported original {map_name}")
-    if mode == 1:
+    if mode == 0:
+        # Sabotage spawn catalogs bind the original rules archive; the supplied
+        # ELF is checked directly and the worker binds it again through the
+        # profile's objective catalog.
+        require(source.get("game_archive_sha256") == RULES_ARCHIVE_SHA
+                and source.get("native_elf_sha256", RETAIL_SHA) == RETAIL_SHA,
+                "wrong Sabotage rules archive source")
+    elif mode == 1:
         require(source.get("native_elf_sha256") == RETAIL_SHA, "wrong Acquisition native ELF source")
     else:
         # Current Domination spawn catalogs bind the qualified original

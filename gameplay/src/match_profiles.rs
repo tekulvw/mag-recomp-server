@@ -108,6 +108,10 @@ struct Source {
     /// Sabotage objectives' own collision per state (`sabotage_structures::SCHEMA`).
     #[serde(default)]
     sabotage_structures: Option<PathBuf>,
+    /// Sabotage static supply points (`human_static_resupply::Catalog`).
+    /// Acquisition and Domination name theirs in their gameplay configuration.
+    #[serde(default)]
+    human_static_resupply: Option<PathBuf>,
 }
 /// One profile's bot inputs. A population is map-bound, so startup validates
 /// it against this profile's own world before the worker advertises it.
@@ -232,6 +236,8 @@ struct Loaded {
     acquisition_apc_turret_source: Option<Arc<[u8]>>,
     bots: Option<ProfileBots>,
     sabotage_structures: Option<Arc<sabotage_structures::Assets>>,
+    /// Sabotage static supply points; the gameplay providers own the others.
+    sabotage_static_resupply: Option<Arc<crate::human_static_resupply::Catalog>>,
 }
 pub struct Registry {
     profiles: BTreeMap<String, Loaded>,
@@ -353,6 +359,7 @@ impl Registry {
                 source.bot_resupply_catalog.as_mut(),
                 source.bot_resupply_approach_policy.as_mut(),
                 source.sabotage_structures.as_mut(),
+                source.human_static_resupply.as_mut(),
             ]
             .into_iter()
             .flatten()
@@ -836,6 +843,18 @@ impl Registry {
                         .map_err(io::Error::other)
                 })
                 .transpose()?;
+            let sabotage_static_resupply = source
+                .human_static_resupply
+                .as_ref()
+                .map(|path| {
+                    if policy.game_type != 0 || acquisition.is_some() || domination.is_some() {
+                        return Err(io::Error::other(
+                            "profile_static_resupply_requires_sabotage_world",
+                        ));
+                    }
+                    crate::human_static_resupply::Catalog::load(path).map(Arc::new)
+                })
+                .transpose()?;
             let summary = Summary {
                 profile_id: source.profile_id.clone(),
                 game_type: policy.game_type,
@@ -884,6 +903,7 @@ impl Registry {
                     acquisition_apc_turret_source,
                     bots,
                     sabotage_structures,
+                    sabotage_static_resupply,
                 },
             );
         }
@@ -1337,6 +1357,17 @@ impl Registry {
             items.retail_combat()?;
         }
         for loaded in self.profiles.values() {
+            if let Some(catalog) = &loaded.sabotage_static_resupply {
+                catalog.bind(
+                    &loaded.spawns,
+                    loaded.collision.as_ref(),
+                    loaded
+                        .objectives
+                        .as_ref()
+                        .ok_or("sabotage_static_resupply_requires_objective_catalog")?,
+                    items,
+                )?;
+            }
             if let Some(world) = &loaded.domination {
                 world.validate_human_static_resupply(
                     &loaded.spawns,
@@ -1480,10 +1511,11 @@ impl Registry {
 
     pub fn has_human_static_resupply(&self) -> bool {
         self.profiles.values().any(|profile| {
-            profile
-                .acquisition
-                .as_ref()
-                .is_some_and(|setup| setup.has_human_static_resupply())
+            profile.sabotage_static_resupply.is_some()
+                || profile
+                    .acquisition
+                    .as_ref()
+                    .is_some_and(|setup| setup.has_human_static_resupply())
                 || profile
                     .domination
                     .as_ref()
@@ -1998,6 +2030,7 @@ impl<W: Write> Engine<W> {
                 .as_ref()
                 .is_some_and(|world| world.state.frag_character_blast);
         self.domination_gameplay = loaded.domination;
+        self.sabotage_static_resupply = loaded.sabotage_static_resupply;
         self.sabotage_structures = loaded.sabotage_structures.map(|assets| {
             // Placed packs collide with what the character movement row does.
             let row = self.collision_world.as_ref().and_then(|world| {
@@ -3166,6 +3199,7 @@ mod tests {
                 acquisition: Some(sample.acquisition_gameplay.unwrap().setup),
                 bots: None,
                 sabotage_structures: None,
+                sabotage_static_resupply: None,
             },
         );
     }
@@ -3196,6 +3230,37 @@ mod tests {
                 "unexpected_match_profile_bunkers"
             );
         }
+    }
+
+    #[test]
+    fn profile_static_resupply_is_sabotage_only_and_bound_at_startup() {
+        let files = Files::new();
+        let catalog = files.write(
+            "static-supply.json",
+            crate::human_static_resupply::tests::document_for("mag_cosmodrome_final", 0, 5),
+        );
+        let manifest = |mode: i8| {
+            files.write(
+                "manifest.json",
+                json!({"format":"mag_match_profiles_v1","profiles":[{
+                    "profile_id":"supply","spawn_catalog":files.spawns(mode, 0, 1),
+                    "human_static_resupply":catalog,
+                }]}),
+            )
+        };
+        assert_eq!(
+            Registry::load(manifest(1)).err().unwrap().to_string(),
+            "profile_static_resupply_requires_sabotage_world"
+        );
+        let registry = Registry::load(manifest(0)).unwrap();
+        assert!(registry.has_human_static_resupply());
+        assert_eq!(
+            base_engine(&files, Vec::new(), u64::MAX)
+                .with_match_profiles(registry)
+                .err(),
+            Some("sabotage_static_resupply_requires_objective_catalog")
+        );
+        assert!(!files.registry().has_human_static_resupply());
     }
 
     #[test]

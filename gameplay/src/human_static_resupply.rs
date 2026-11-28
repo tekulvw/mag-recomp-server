@@ -10,6 +10,8 @@ const PANAMA: &str = "mag_panama_military_base_final";
 
 fn authored_provider_count(map: &str, mode: i8) -> Option<usize> {
     match (map, mode) {
+        ("mag_cosmodrome_final" | "mag_remote_comms_final", 0) => Some(5),
+        ("mag_kennicott_final", 0) => Some(4),
         ("mag_alaska_subpen_final", 1) => Some(10),
         ("mag_panama_military_base_final", 1) => Some(9),
         ("mag_voz_final", 1) => Some(11),
@@ -316,6 +318,7 @@ impl<W: Write> Engine<W> {
                     .human_static_resupply
                     .as_deref()
             })
+            .or(self.sabotage_static_resupply.as_deref())
     }
 
     pub(super) fn plan_static_resupply(
@@ -592,7 +595,7 @@ impl<W: Write> Engine<W> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::spawn_progression::{dispatch, ready};
     use std::sync::Arc;
@@ -601,7 +604,7 @@ mod tests {
         document_for(PANAMA, 1, 9)
     }
 
-    fn document_for(map: &str, mode: i8, count: u32) -> Value {
+    pub(crate) fn document_for(map: &str, mode: i8, count: u32) -> Value {
         let hash = "a".repeat(64);
         json!({
             "schema_version":1,"format":"mag_retail_human_static_resupply",
@@ -987,6 +990,9 @@ mod tests {
     #[test]
     fn human_static_resupply_catalog_checks_each_mode_map_inventory() {
         for (map, mode, count) in [
+            ("mag_cosmodrome_final", 0, 5),
+            ("mag_kennicott_final", 0, 4),
+            ("mag_remote_comms_final", 0, 5),
             ("mag_alaska_subpen_final", 1, 10),
             (PANAMA, 1, 9),
             ("mag_voz_final", 1, 11),
@@ -1093,6 +1099,83 @@ mod tests {
         dispatch(&mut engine, &request(1, FAMILY_PREFIX), 1250).unwrap();
         tick(&mut engine, 2200).unwrap();
         assert_eq!(health(&engine), 298);
+    }
+
+    #[test]
+    fn human_static_resupply_sabotage_profile_catalog_heals_and_replies() {
+        let mut engine = fixture();
+        Arc::get_mut(&mut engine.acquisition_gameplay.as_mut().unwrap().setup)
+            .unwrap()
+            .human_static_resupply = None;
+        wounded(&mut engine, 250);
+        engine
+            .active
+            .as_mut()
+            .unwrap()
+            .spawned_loadout
+            .as_mut()
+            .unwrap()
+            .inventories[0]
+            .slots[4] = None;
+        // Without a catalog the Start is refused and nothing heals.
+        dispatch(&mut engine, &request(0, FAMILY_PREFIX | 1), 200).unwrap();
+        assert!(engine.active.as_ref().unwrap().static_resupply.is_empty());
+        tick(&mut engine, 1200).unwrap();
+        assert_eq!(health(&engine), 250);
+
+        let mut catalog = document_for("mag_cosmodrome_final", 0, 5);
+        for provider in catalog["providers"].as_array_mut().unwrap() {
+            provider["percent_refresh_rate"] = json!(10.0);
+        }
+        engine.sabotage_static_resupply = Some(Arc::new(parse(&catalog).unwrap()));
+        dispatch(&mut engine, &request(0, FAMILY_PREFIX | 1), 1300).unwrap();
+        assert_eq!(engine.active.as_ref().unwrap().static_resupply.len(), 1);
+        let before_frames = engine.active.as_ref().unwrap().ordinary_shared_len();
+        tick(&mut engine, 2299).unwrap();
+        assert_eq!(health(&engine), 250);
+        tick(&mut engine, 2300).unwrap();
+        // Ten percent of 100 HP, in quarter points, with one health reply.
+        assert_eq!(health(&engine), 290);
+        let actor = engine.active.as_ref().unwrap();
+        assert!(matches!(
+            actor.life,
+            CharacterLife::Alive {
+                generation: 4,
+                health_quarter_points: 290
+            }
+        ));
+        assert_eq!(actor.ordinary_shared_len(), before_frames + 1);
+        assert!(actor.ordered_health_pending);
+        tick(&mut engine, 3300).unwrap();
+        assert_eq!(health(&engine), 330);
+    }
+
+    #[test]
+    fn human_static_resupply_does_not_start_or_heal_a_downed_character() {
+        let downed = CharacterLife::Incapacitated {
+            generation: 4,
+            downed: crate::incapacitation::Downed {
+                deadline: Duration::from_secs(30),
+                accumulated_damage_hp: 0.,
+            },
+        };
+        let mut engine = fixture();
+        configure_health_rate(&mut engine, 10.);
+        wounded(&mut engine, 250);
+        engine.active.as_mut().unwrap().life = downed;
+        dispatch(&mut engine, &request(0, FAMILY_PREFIX), 200).unwrap();
+        assert!(engine.active.as_ref().unwrap().static_resupply.is_empty());
+
+        // Going down inside the box ends an existing session before it heals.
+        let mut engine = fixture();
+        configure_health_rate(&mut engine, 10.);
+        wounded(&mut engine, 250);
+        dispatch(&mut engine, &request(0, FAMILY_PREFIX), 200).unwrap();
+        assert_eq!(engine.active.as_ref().unwrap().static_resupply.len(), 1);
+        engine.active.as_mut().unwrap().life = downed;
+        tick(&mut engine, 1200).unwrap();
+        assert_eq!(health(&engine), 250);
+        assert!(engine.active.as_ref().unwrap().static_resupply.is_empty());
     }
 
     #[test]

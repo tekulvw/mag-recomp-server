@@ -300,6 +300,7 @@ impl<W: Write> Engine<W> {
             domination_round: None,
             domination_gameplay: None,
             sabotage_structures: None,
+            sabotage_static_resupply: None,
             hospital_rockets: None,
             infantry_rockets: None,
             guided_launchers: None,

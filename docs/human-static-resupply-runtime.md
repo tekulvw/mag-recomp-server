@@ -5,7 +5,11 @@ Set `human_static_resupply` in the Acquisition gameplay configuration, or
 owner-projected catalog for the selected map and attacking faction. Paths
 resolve relative to the gameplay configuration file. The fields are accepted
 through direct Acquisition configuration and registered match profiles.
-The supported Acquisition maps are Alaska Subpen, Panama and VOZ. The
+A Sabotage match profile row sets `human_static_resupply` itself; its path
+resolves relative to the profile manifest, and the row needs its objective
+catalog and collision world.
+The supported Sabotage maps are Cosmodrome, Kennicott and Remote Comms. The
+supported Acquisition maps are Alaska Subpen, Panama and VOZ. The
 supported Domination maps are Baku, Canal and Unalaska.
 Omitting the field disables human static resupply. Use offline
 `--validate-catalogs` startup to verify the resource binding. The readiness output
@@ -33,7 +37,9 @@ finite, positive effective interval. If an ordinary frag is selected, the pulse
 fills its launch budget to the authored cap. The retail client uses separate
 local clip and reserve timing.
 
-A positive authored percentage restores that fraction of effective maximum HP
+Every shipped supply definition authors a 1 second TickRate and a 10 percent
+PercentRefreshRate, so a standing Character regains a tenth of its maximum HP
+each second. A positive authored percentage restores that fraction of effective maximum HP
 using single-precision arithmetic, capped at missing HP. Each application
 truncates the resulting health to quarter-HP precision. The ordinary type-6
 Character health update retains previous hit attribution. Supply healing is
@@ -44,7 +50,7 @@ reliable queue, the entire candidate stays due and the scheduler continues
 draining the queue.
 
 The replacement session is bound to the current reservation, actor life and
-round. It ends on a mounted or dead actor, a departed or unavailable provider,
+round. It ends on a mounted, incapacitated or dead actor, a departed or unavailable provider,
 or a stale round. The due-time range check is a replacement policy. Original
 static Start checks the box while the observed original due path resolves the
 recipient without repeating that geometry test. The worker does not use the
