@@ -15,6 +15,7 @@ fn squad(squad: u16, team: u8, lane_x: f64) -> Squad {
         squad,
         team,
         lane: Some([lane_x, 0., 0.]),
+        ordered: false,
     }
 }
 
@@ -280,4 +281,58 @@ fn a_side_keeps_a_bounded_number_of_teams_and_rests_after_one_ends() {
     );
     assert_eq!(next.len(), 2);
     assert!(next.get(&1) == Some(&8) || next.get(&2) == Some(&8));
+}
+
+#[test]
+fn a_squad_on_its_leaders_frago_keeps_its_bots_and_the_side_sends_another_team() {
+    let policy = Policy {
+        teams_per_side: 1,
+        give_up_ms: 600_000,
+        ..Default::default()
+    };
+    let mut book = Book::default();
+    let targets = [target(7, 10., 1, 100.)];
+    let bots = [bot(1, 0, 0.), bot(2, 1, 0.)];
+    // Squad 0 has the side's only team before its leader tags a FRAGO.
+    let free = [squad(0, 0, 0.), squad(1, 0, 0.)];
+    let mut changes = Vec::new();
+    let first = book.plan(ms(0), &targets, &free, &bots, &policy, &mut changes);
+    assert_eq!(first, BTreeMap::from([(1, 7)]));
+    // The leader's FRAGO takes the squad: its team ends without a rest, and
+    // the side's next squad takes the structure in the same tick.
+    let ordered = [
+        Squad {
+            ordered: true,
+            ..free[0]
+        },
+        free[1],
+    ];
+    let mut changes = Vec::new();
+    let second = book.plan(ms(10), &targets, &ordered, &bots, &policy, &mut changes);
+    assert_eq!(second, BTreeMap::from([(2, 7)]));
+    assert!(changes.contains(&Change::Ended {
+        squad: 0,
+        target: 7,
+        reason: "frago",
+    }));
+    assert!(changes.contains(&Change::Left {
+        squad: 0,
+        target: 7,
+        bot: 1,
+    }));
+    // While the FRAGO lasts the squad never sends a team, even alone.
+    let mut alone = Book::default();
+    let only = book_plan_alone(&mut alone, &policy, ordered[0]);
+    assert!(only.is_empty());
+}
+
+fn book_plan_alone(book: &mut Book, policy: &Policy, squad: Squad) -> BTreeMap<u16, u16> {
+    book.plan(
+        ms(0),
+        &[target(7, 10., 1, 100.)],
+        &[squad],
+        &[bot(1, squad.squad, 0.)],
+        policy,
+        &mut Vec::new(),
+    )
 }

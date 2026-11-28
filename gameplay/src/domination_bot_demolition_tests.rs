@@ -144,6 +144,25 @@ fn an_attacking_squad_sends_a_bot_to_the_spawn_structure_near_its_lane() {
 }
 
 #[test]
+fn a_squad_on_its_leaders_frago_keeps_its_bot_off_the_structure() {
+    let (mut engine, bot) = demolition_fixture();
+    let (duties, _) = plan(&mut engine, 1000);
+    assert_eq!(duties, BTreeMap::from([(bot, 0)]));
+    // The squad's human leader tags a FRAGO it now works on: the team ends
+    // and the bot is left to the FRAGO.
+    engine.bot_registry.director.squad_orders.ordered.insert(0);
+    let (duties, receipts) = plan(&mut engine, 2000);
+    assert!(duties.is_empty());
+    assert!(receipts.iter().any(|r| r["op"] == "bot_demolition_team"
+        && r["picked"] == false
+        && r["reason"] == "frago"));
+    // Once the squad is back on its lane, it may send a team again at once.
+    engine.bot_registry.director.squad_orders.ordered.clear();
+    let (duties, _) = plan(&mut engine, 3000);
+    assert_eq!(duties, BTreeMap::from([(bot, 0)]));
+}
+
+#[test]
 fn the_demolition_policy_switch_turns_teams_off() {
     let (mut engine, _) = demolition_fixture();
     engine

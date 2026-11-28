@@ -42,13 +42,18 @@ An objective is open for a team while the team has an action there (arm,
 capture, secure, defuse, deactivate or retake), or while it is neither
 inactive, completed nor locked (the team's own point to defend, or a charge
 that is already armed). A completed or locked FRAGO is never followed, and its
-squad returns to its lane. Tags that name a vehicle, helicopter or hospital,
+squad returns to its lane. When the squad's own side completes the tagged
+objective, the leader's tag is cleared as retail does
+([squad-manual-orders.md](squad-manual-orders.md#completed-tags)), so the
+leader's HUD no longer shows the finished target. Tags that name a vehicle, helicopter or hospital,
 or an objective without a place bots can reach, are not followed either: the
 squad stays on its lane.
 
 Duties still come first for the bots that hold them, in their existing order:
 armed-objective duties and blast evacuation, repair, demolition teams, then
-the squad's objective. Resupply runs pause objective work as before. When a
+the squad's objective. A squad on its human leader's FRAGO sends no
+demolition team, and a team it had ends, so every bot of the squad that has
+no other duty works on the FRAGO ([bot-demolition.md](bot-demolition.md)). Resupply runs pause objective work as before. When a
 duty ends, the bot returns to its squad's objective. Bot lives of a squad on
 a FRAGO, or defending its objective, start at the points nearest this
 objective by route ([bot-active-spawns.md](bot-active-spawns.md)). Demolition team scoring still

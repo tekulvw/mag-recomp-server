@@ -759,3 +759,172 @@ fn automatic_bot_tags_skip_leader_authority_and_the_set_gate_until_a_leader_tags
     assert_eq!(manual, LEADER_TAG);
     assert!(book.human_order(SABOTAGE_SQUAD, true, manual));
 }
+
+/// A completion entry for `objective`, credited to `player` or a bot of `team`.
+fn completion(
+    engine: &Engine<Vec<u8>>,
+    objective: u16,
+    player: Option<u16>,
+    bot_team: Option<u8>,
+) -> objective_control::NativeEntry {
+    use replication::ObjectiveState as S;
+    let mut delta = engine
+        .objective_world
+        .as_ref()
+        .unwrap()
+        .snapshot(1, 130)
+        .objectives
+        .into_iter()
+        .find(|o| o.object_index == objective)
+        .unwrap();
+    delta.state_actor = replication::ObjectiveStateActor {
+        state: S::Completed,
+        actor_index: player.unwrap_or(u16::MAX),
+        change_time_ms: 130,
+    };
+    objective_control::NativeEntry {
+        class: objective_control::NativeClass::Structural,
+        previous: S::Activated,
+        delta,
+        actor_generation: None,
+        reward_actor: player,
+        active_trigger_index: None,
+        bot_plant: bot_team.map(|team| objective_control::BotPlantSource {
+            player: 200,
+            allocation: 1,
+            life: 1,
+            team,
+            world: 1,
+            round: engine.round_number,
+        }),
+    }
+}
+
+/// Leave `objective` Completed in the live objective world.
+fn complete_in_world(engine: &mut Engine<Vec<u8>>, objective: u16) {
+    let mut catalog = engine.objective_catalog.clone().unwrap();
+    catalog
+        .objects
+        .iter_mut()
+        .find(|o| o.object_index == objective)
+        .unwrap()
+        .initial_state = replication::ObjectiveState::Completed as u8;
+    engine.objective_world = Some(objective_control::ObjectiveWorld::new(&catalog));
+}
+
+#[test]
+fn a_tag_on_an_objective_its_side_completed_is_cleared_and_published() {
+    const TARGET: u32 = 0x0c80_000b;
+    let mut engine = sabotage_fixture(true);
+    engine.world_tick_enabled = true;
+    let tag_state = |engine: &Engine<Vec<u8>>| order_state(engine).manual_tag(SABOTAGE_SQUAD);
+    assert_eq!(
+        tag_as(&mut engine, SABOTAGE_LEADER, TARGET, 501)["accepted"],
+        true
+    );
+    engine
+        .queue_squad_orders(Duration::from_millis(501), 1)
+        .unwrap();
+    assert_eq!(
+        published_tag(&engine, SABOTAGE_MEMBER, SABOTAGE_SQUAD),
+        Some(TARGET)
+    );
+    let team = (SABOTAGE_SQUAD / 16) as u8;
+    // The leader is in the game, so a completion can be credited to them.
+    let game_info = protocol::GameInfo {
+        client_index: SABOTAGE_LEADER,
+        level_name: "synthetic_arena".into(),
+        start_time_ms: 0,
+        attacking_faction: 1,
+        defending_faction: 0,
+        maximum_points: [1200, 1000],
+        current_points: [1200, 1000],
+        game_type: 0,
+    };
+    actor_mut(&mut engine, SABOTAGE_LEADER).claimed = Some(Claimed {
+        wire: Vec::new(),
+        np_identity: [0; 36],
+        game_info,
+    });
+    actor_mut(&mut engine, SABOTAGE_LEADER).entered_game = true;
+
+    // The other side completing it leaves the tag alone.
+    let entry = completion(&engine, 11, None, Some(1 - team));
+    complete_in_world(&mut engine, 11);
+    engine.note_completed_squad_tag(entry);
+    engine
+        .queue_squad_orders(Duration::from_millis(600), 1)
+        .unwrap();
+    assert_eq!(tag_state(&engine), TARGET);
+
+    // The leader's own side completing it clears the tag for the squad.
+    let entry = completion(&engine, 11, Some(SABOTAGE_LEADER), None);
+    engine.note_completed_squad_tag(entry);
+    assert_eq!(engine.completed_squad_tags, vec![(team, 11)]);
+    engine
+        .queue_squad_orders(Duration::from_millis(700), 1)
+        .unwrap();
+    assert_eq!(tag_state(&engine), u32::MAX);
+    assert!(engine.completed_squad_tags.is_empty());
+    for player in [SABOTAGE_LEADER, SABOTAGE_MEMBER] {
+        assert_eq!(
+            published_tag(&engine, player, SABOTAGE_SQUAD),
+            Some(u32::MAX),
+            "squad member {player} sees the cleared FRAGO"
+        );
+    }
+    let cleared = std::str::from_utf8(&engine.writer)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str::<Value>(line).unwrap())
+        .find(|record| record["op"] == "squad_tags_cleared")
+        .unwrap();
+    assert_eq!(
+        cleared["squads"],
+        json!([{"squad_index":SABOTAGE_SQUAD,"objective":11,"previous_tag":TARGET,
+            "applied":true,"error":null}])
+    );
+    // Clearing does not stamp the set gate: the leader's next tag waits only
+    // for the gate their own last tag started.
+    assert_eq!(
+        tag_as(&mut engine, SABOTAGE_LEADER, 0x0c80_000a, 1501)["accepted"],
+        true
+    );
+}
+
+#[test]
+fn a_completion_leaves_reopened_objectives_and_server_kept_tags_alone() {
+    const TARGET: u32 = 0x0c80_000b;
+    let mut engine = sabotage_fixture(true);
+    assert_eq!(
+        tag_as(&mut engine, SABOTAGE_LEADER, TARGET, 501)["accepted"],
+        true
+    );
+    let entry = completion(&engine, 11, Some(SABOTAGE_LEADER), None);
+    let mut catalog = engine.objective_catalog.clone().unwrap();
+    catalog
+        .objects
+        .iter_mut()
+        .find(|o| o.object_index == 11)
+        .unwrap()
+        .initial_state = replication::ObjectiveState::Activated as u8;
+    engine.objective_world = Some(objective_control::ObjectiveWorld::new(&catalog));
+    engine.note_completed_squad_tag(entry);
+    engine
+        .queue_squad_orders(Duration::from_millis(600), 1)
+        .unwrap();
+    assert_eq!(order_state(&engine).manual_tag(SABOTAGE_SQUAD), TARGET);
+    assert!(engine.completed_squad_tags.is_empty());
+    // A tag the server keeps for its bots moves with them instead.
+    complete_in_world(&mut engine, 11);
+    engine
+        .bot_registry
+        .director
+        .squad_orders
+        .set(SABOTAGE_SQUAD, TARGET);
+    engine.completed_squad_tags.push((1, 11));
+    engine
+        .queue_squad_orders(Duration::from_millis(700), 1)
+        .unwrap();
+    assert_eq!(order_state(&engine).manual_tag(SABOTAGE_SQUAD), TARGET);
+}

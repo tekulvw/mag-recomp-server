@@ -47,6 +47,14 @@ these links so far; elsewhere every structure is `other`.
   for its life, and empty places are refilled.
 - Duty priority is armed-objective duty, then repair duty, then demolition,
   then the lane.
+- A squad that works on its human leader's FRAGO
+  ([bot-squad-orders.md](bot-squad-orders.md)) sends no team: the leader's
+  order keeps all of its bots. A team the squad already had ends (`frago`)
+  without making its side rest, so another squad of the side may take the
+  structure at once. The squad may send a team again once it is back on its
+  lane. A live Domination match showed why: a leader tagged the defenders'
+  anti-air gun, and the side's one team kept taking one of the squad's bots at
+  a time to a bunker 80 m away.
 - The team's nearest member becomes the structure's operator through the
   ordinary operator selection. It walks into an authored trigger and arms the
   charge with the same START a player sends
@@ -88,8 +96,8 @@ Teams also need `objective_policy.interactions_enabled`.
 
 - `bot_demolition_team`: a squad picked a structure (`picked: true`, `score`)
   or its team ended (`picked: false`, `reason`: `unavailable` when the
-  structure is armed, destroyed or held, `squad_unavailable`, `gave_up` or
-  `disabled`).
+  structure is armed, destroyed or held, `squad_unavailable`, `frago` when
+  the squad's leader's FRAGO took it, `gave_up` or `disabled`).
 - `bot_demolition_duty`: a bot joined or left a team.
 - `bot_objective_action`: the operator's arming request and its result.
 
