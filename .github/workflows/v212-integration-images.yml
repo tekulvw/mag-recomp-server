@@ -1,0 +1,80 @@
+name: 2.12 integration container images
+
+on:
+  workflow_call:
+
+permissions: {}
+concurrency:
+  group: v212-integration-images-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  checks:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/retail-v2.12'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/check.yml
+    with:
+      ref: ${{ github.sha }}
+      checks: all
+
+  build:
+    needs: checks
+    runs-on: mag-recomp-server
+    timeout-minutes: 90
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - context: horizon
+            suffix: medius
+          - context: gameplay
+            suffix: game
+          - context: portal
+            suffix: portal
+    steps:
+      - name: Check out the tested integration commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Resolve the component image name
+        id: source
+        env:
+          IMAGE_SUFFIX: ${{ matrix.suffix }}
+        run: |
+          owner="$(printf '%s' "$GITHUB_REPOSITORY_OWNER" | tr '[:upper:]' '[:lower:]')"
+          echo "image=ghcr.io/$owner/mag-recomp-server-$IMAGE_SUFFIX" >> "$GITHUB_OUTPUT"
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      - name: Build and publish an integration image
+        id: image
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: ./${{ matrix.context }}
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.source.outputs.image }}:v212-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.description=Unreleased MAG 2.12 integration test build
+          # Reuse stable layers without replacing the main cache or image aliases.
+          cache-from: type=registry,ref=${{ steps.source.outputs.image }}:buildcache
+      - name: Report the exact deployment reference
+        env:
+          IMAGE: ${{ steps.source.outputs.image }}
+          DIGEST: ${{ steps.image.outputs.digest }}
+        run: |
+          test -n "$DIGEST"
+          printf '* Source: %s\n* Deploy by digest: %s@%s\n' \
+            "$GITHUB_SHA" "$IMAGE" "$DIGEST" >> "$GITHUB_STEP_SUMMARY"

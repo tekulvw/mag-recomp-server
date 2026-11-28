@@ -25,6 +25,15 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Reuse this existing dispatch entry point while the new integration workflow
+  # exists only on its branch. It must not promote any main image aliases.
+  integration-v212:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/retail-v2.12'
+    permissions:
+      contents: read
+      packages: write
+    uses: ./.github/workflows/v212-integration-images.yml
+
   plan:
     if: github.ref == 'refs/heads/main'
     runs-on: mag-recomp-server

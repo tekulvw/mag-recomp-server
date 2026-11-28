@@ -1,0 +1,32 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/v17.6.0/schemas/config.json",
+  "release-type": "simple",
+  "initial-version": "0.1.0",
+  "bump-minor-pre-major": true,
+  "include-v-in-tag": true,
+  "include-component-in-tag": true,
+  "separate-pull-requests": false,
+  "bootstrap-sha": "d02c19cf678e4403baef62ae0afe3e81dc31f592",
+  "packages": {
+    "horizon": {
+      "release-type": "simple",
+      "component": "medius-212",
+      "version-file": "version.txt"
+    },
+    "gameplay": {
+      "release-type": "rust",
+      "component": "gameplay-212"
+    },
+    "charts/mag-recomp-server": {
+      "release-type": "helm",
+      "component": "chart-212"
+    },
+    "portal": {
+      "release-type": "rust",
+      "component": "portal-212"
+    }
+  },
+  "versioning": "prerelease",
+  "prerelease": true,
+  "prerelease-type": "v212"
+}
