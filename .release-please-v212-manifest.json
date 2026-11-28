@@ -1,5 +1,5 @@
 {
-  "horizon": "0.15.1",
+  "horizon": "0.16.0-v212",
   "gameplay": "0.19.0",
   "charts/mag-recomp-server": "0.13.1",
   "portal": "0.10.0"

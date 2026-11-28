@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.16.0-v212](https://github.com/tekulvw/mag-recomp-server/compare/medius-212-v0.15.1...medius-212-v0.16.0-v212) (2026-11-28)
+
+
+### Features
+
+* **protocol:** add offline 2.12 purchase wire ([#441](https://github.com/tekulvw/mag-recomp-server/issues/441)) ([dfc2508](https://github.com/tekulvw/mag-recomp-server/commit/dfc25087e409f81b3cabc9de6c3060e91bd279ad))
+* **server:** add 2.12 patch codec and integration build foundation ([#437](https://github.com/tekulvw/mag-recomp-server/issues/437)) ([512f303](https://github.com/tekulvw/mag-recomp-server/commit/512f303cb83678b0a895eb95b32a42534323e6ab))
+* **server:** bind 2.12 bootstrap catalogs ([#440](https://github.com/tekulvw/mag-recomp-server/issues/440)) ([11f351a](https://github.com/tekulvw/mag-recomp-server/commit/11f351aec01bf3d31d7b87993b28ac3a5a04d5a9))
+* **server:** connect 2.12 login and character sessions ([#439](https://github.com/tekulvw/mag-recomp-server/issues/439)) ([0216f7f](https://github.com/tekulvw/mag-recomp-server/commit/0216f7f728f8ca78be5d705a6ad77d57a4be4f66))
+
 ## [0.15.1](https://github.com/tekulvw/mag-recomp-server/compare/medius-v0.15.0...medius-v0.15.1) (2026-11-28)
 
 
