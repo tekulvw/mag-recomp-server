@@ -10,7 +10,7 @@
   <dt>Joined</dt><dd>{{ created }}</dd>
   <dt>Friends</dt><dd>{{ social.friends }} (requests: {{ social.incoming }} in, {{ social.outgoing }} out; blocks: {{ social.blocks }})</dd>
   <dt>Staff role</dt><dd>{% if let Some(r) = target_role %}{{ r }}{% else %}none{% endif %}</dd>
-  <dt>Status</dt><dd>{% if let Some(b) = ban %}<strong>banned</strong> {{ b }}{% else %}active{% endif %}</dd>
+  <dt>Status</dt><dd>{% if let Some(b) = ban %}<strong>banned</strong> since {{ b.since }}: {{ b.reason }}{% else %}active{% endif %}</dd>
   {% if let Some(g) = game_href %}<dt>Game character</dt><dd><a href="{{ g }}">View on the game server</a></dd>{% endif %}
 </dl>
 

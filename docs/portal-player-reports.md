@@ -19,8 +19,9 @@ the account page (not from the public pages).
   name, or other.
 - **What happened:** required, at most 1,000 characters. Line breaks are kept; other control
   characters and direction overrides are dropped.
-- **About when:** optional, in the player's local time. The form script sends the browser's time
-  zone, and the portal stores the time in UTC (without the script the time is taken as UTC). It
+- **About when:** optional, in the player's local time. The shared time script (`/time.js`) names
+  the zone beside the field and sends the browser's offset, and the portal stores the time in UTC
+  (without the script the field says UTC and the time is taken as UTC). It
   must be within the last year and not more than a day ahead.
 
 The rules:

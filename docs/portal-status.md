@@ -36,7 +36,8 @@ The page and the JSON carry counts only. The portal copies named fields from the
 or player names, and never the game servers' addresses.
 
 Above the status, staff can show a **maintenance or incident banner**: admins set its text and
-an optional "restart expected at" time (UTC) on the admin panel's Status page (`/admin/status`),
+an optional "restart expected at" time on the admin panel's Status page (`/admin/status`), typed
+in the admin's local time (UTC without scripts) and stored in UTC,
 or remove it. Each change goes to the audit log. The banner shows on the home page, `/status`
 and in the JSON. Moderators see the admin Status page, including staff-only servers, but cannot
 change the banner.
@@ -53,13 +54,16 @@ status shows as down with "This game server version does not report its status."
 
 ## Live updates
 
-The home page and `/status` load `/status.js`, a small same-origin script (the site's
+Every page loads `/time.js`, which shows the banner's restart time and a server's "last seen" time
+in the viewer's time zone (pages and the JSON carry UTC). The home page and `/status` also load
+`/status.js`, a small same-origin script (the site's
 Content-Security-Policy allows scripts and fetches from its own origin only, and no inline
 script). While the tab is visible it fetches `/api/v1/status` every refresh interval, which the
 portal serves from its cache, and rebuilds the status block, its heading and the banner in
 place. It builds elements with `textContent` only and never parses anything from the answer as
 HTML. It stops while the tab is hidden and fetches at once when the tab is shown again. A line
-under the block says how long ago the data was updated; when a fetch fails it keeps the last
+under the block says how long ago the data was updated (its tooltip gives the local and UTC
+time); when a fetch fails it keeps the last
 data, dims it and says it could not refresh. Without scripts, the server-rendered block stays
 as loaded.
 

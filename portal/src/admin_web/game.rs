@@ -28,7 +28,7 @@ use crate::game_admin::{
 };
 use crate::staff::{self, Role};
 use crate::status::faction_name;
-use crate::web::{AppState, PageResult, Shared, message, page};
+use crate::web::{AppState, PageResult, Shared, Stamp, message, page};
 
 pub(super) fn routes() -> Router<Arc<AppState>> {
     Router::new()
@@ -50,8 +50,8 @@ pub(super) fn routes() -> Router<Arc<AppState>> {
 struct SanctionRow {
     account: String,
     kind: String,
-    ends: String,
-    since: String,
+    ends: Stamp,
+    since: Stamp,
     operator: String,
     reason: String,
 }
@@ -61,8 +61,11 @@ impl From<VoiceSanction> for SanctionRow {
         Self {
             account: s.account,
             kind: s.kind,
-            ends: s.expires_at.unwrap_or_else(|| "until lifted".into()),
-            since: s.created_at,
+            ends: s
+                .expires_at
+                .as_deref()
+                .map_or_else(|| Stamp::text("until lifted"), Stamp::parse),
+            since: Stamp::parse(&s.created_at),
             operator: s.operator,
             reason: s.reason.unwrap_or_default(),
         }
@@ -179,7 +182,7 @@ struct CharacterRow {
     skill_points: i64,
     session: &'static str,
     /// When the player deleted it: `Some` for a deleted character ("" if the time is unknown).
-    deleted_at: Option<String>,
+    deleted_at: Option<Stamp>,
     portal_id: Option<i32>,
 }
 
@@ -190,7 +193,9 @@ impl CharacterRow {
             slot: c.slot,
             name: c.name.unwrap_or_default(),
             faction: c.faction.map_or("", faction_name),
-            deleted_at: c.deleted.then(|| c.deleted_at.unwrap_or_default()),
+            deleted_at: c
+                .deleted
+                .then(|| Stamp::parse(c.deleted_at.as_deref().unwrap_or_default())),
             portal_id,
             account: c.account,
             level: c.level,
@@ -294,7 +299,7 @@ struct SlotRow {
     experience: i64,
     skill_points: i64,
     /// `Some` for a deleted character ("" if the time is unknown).
-    deleted_at: Option<String>,
+    deleted_at: Option<Stamp>,
     /// The character the page shows.
     selected: bool,
 }
@@ -303,7 +308,9 @@ impl SlotRow {
     fn new(c: AccountCharacter, selected: Option<u32>) -> Self {
         Self {
             selected: !c.deleted && selected == Some(c.character_id),
-            deleted_at: c.deleted.then(|| c.deleted_at.unwrap_or_default()),
+            deleted_at: c
+                .deleted
+                .then(|| Stamp::parse(c.deleted_at.as_deref().unwrap_or_default())),
             slot: c.slot,
             name: c.name,
             faction: faction_name(c.faction),
@@ -938,8 +945,9 @@ mod tests {
         assert!(html.contains("<a href=\"/admin/game/characters/alpha?slot=2\">AlphaTwo</a>"));
         assert!(html.contains("<td>Valor</td>") && html.contains("<td>SVER</td>"));
         // The deleted character is marked and not linked to its (free) slot.
-        assert!(html.contains("AlphaOld <span class=\"pill\">deleted</span>"));
-        assert!(html.contains("2026-11-20T08:30:00Z"));
+        assert!(html.contains(
+            "AlphaOld <span class=\"pill\">deleted</span> <span class=\"quiet\"><time class=\"local-time\" datetime=\"2026-11-20T08:30:00Z\" title=\"2026-11-20 08:30:00 UTC\">2026-11-20 08:30 UTC</time></span>"
+        ));
         assert!(!html.contains("?slot=1"));
     }
 
@@ -1010,7 +1018,9 @@ mod tests {
         assert!(html.contains("<strong>AlphaTwo</strong> <span class=\"quiet\">(shown below)"));
         assert!(!html.contains("?slot=2\">"));
         // The deleted one shows when, and has no link.
-        assert!(html.contains("<span class=\"pill\">deleted</span> 2026-11-20T08:30:00Z"));
+        assert!(html.contains(
+            "<span class=\"pill\">deleted</span> <time class=\"local-time\" datetime=\"2026-11-20T08:30:00Z\" title=\"2026-11-20 08:30:00 UTC\">2026-11-20 08:30 UTC</time>"
+        ));
         assert!(!html.contains("?slot=1"));
         assert!(html.contains("<h2>Slot 2 · AlphaTwo</h2>"));
         assert!(html.contains("<dt>Faction</dt><dd>SVER</dd>"));

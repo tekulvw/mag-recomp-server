@@ -18,7 +18,7 @@ use time::OffsetDateTime;
 use super::{CsrfOnly, Nav, Staff, require_staff, require_staff_form};
 use crate::staff::{self, Role};
 use crate::status::{self, StatusView};
-use crate::web::{AppState, PageResult, Shared, page, when};
+use crate::web::{AppState, PageResult, Shared, form_value, page, when};
 
 const PATH: &str = "/admin/status";
 
@@ -59,7 +59,14 @@ fn render(
     let view = state.status.view(OffsetDateTime::now_utc(), true);
     let current = state.status.banner();
     let (message, restart) = match form {
-        Some(f) => (f.message.clone(), f.restart_at.clone()),
+        // Sent back in UTC, as the field always holds it; one that does not parse, as typed.
+        Some(f) => (
+            f.message.clone(),
+            match status::restart_time(&f.restart_at, &f.tz) {
+                Ok(Some(t)) => form_value(t),
+                _ => f.restart_at.clone(),
+            },
+        ),
         None => (
             current
                 .as_ref()
@@ -67,11 +74,7 @@ fn render(
                 .unwrap_or_default(),
             current
                 .and_then(|b| b.restart_expected_at)
-                .map(|t| {
-                    let f =
-                        time::macros::format_description!("[year]-[month]-[day]T[hour]:[minute]");
-                    t.format(&f).unwrap_or_default()
-                })
+                .map(form_value)
                 .unwrap_or_default(),
         ),
     };
@@ -107,6 +110,9 @@ struct BannerForm {
     message: String,
     #[serde(default)]
     restart_at: String,
+    /// The browser's `Date.getTimezoneOffset()` for `restart_at`; empty: UTC.
+    #[serde(default)]
+    tz: String,
 }
 
 async fn set_banner(
@@ -119,8 +125,8 @@ async fn set_banner(
         let error = format!("Write a message of 1 to {} characters.", status::MAX_BANNER);
         return render(&state, &actor, Some(error), Some(&form));
     };
-    let Ok(restart) = status::restart_time(&form.restart_at) else {
-        let error = "Give the restart time as a date and time (UTC), or leave it empty.".to_owned();
+    let Ok(restart) = status::restart_time(&form.restart_at, &form.tz) else {
+        let error = "Give the restart time as a date and time, or leave it empty.".to_owned();
         return render(&state, &actor, Some(error), Some(&form));
     };
     let by = actor.account().email.clone().unwrap_or_default();

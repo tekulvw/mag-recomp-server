@@ -17,7 +17,7 @@ use serde::Deserialize;
 use super::{Nav, Staff, require_staff, require_staff_form};
 use crate::player_reports::{self, MAX_NOTE, Reason, Report, ReviewOutcome, Status};
 use crate::staff::{self, Role};
-use crate::web::{AppState, PageResult, Shared, message, page, when};
+use crate::web::{AppState, PageResult, Shared, Stamp, message, page, stamp};
 
 const LIST: &str = "/admin/player-reports";
 const LIST_LIMIT: i64 = 200;
@@ -45,7 +45,7 @@ fn preview(text: &str) -> String {
 
 struct Row {
     id: i64,
-    filed: String,
+    filed: Stamp,
     reporter_id: Option<i32>,
     reporter: String,
     target: String,
@@ -59,7 +59,7 @@ struct Row {
 impl From<Report> for Row {
     fn from(r: Report) -> Self {
         Self {
-            filed: when(r.created_at),
+            filed: stamp(r.created_at),
             reporter: reporter_label(r.reporter_account, r.reporter_name.as_deref()),
             reporter_id: r.reporter_account,
             target: r.target_name,
@@ -149,6 +149,12 @@ async fn list_page(
     ))
 }
 
+/// When a report was reviewed, and by whom.
+struct Reviewed {
+    at: Stamp,
+    by: String,
+}
+
 #[derive(Template)]
 #[template(path = "admin_player_report.html")]
 struct ReportPage {
@@ -157,7 +163,7 @@ struct ReportPage {
     role: &'static str,
     is_admin: bool,
     id: i64,
-    filed: String,
+    filed: Stamp,
     reporter_id: Option<i32>,
     reporter: String,
     target_name: String,
@@ -166,10 +172,10 @@ struct ReportPage {
     game_href: Option<String>,
     reason: String,
     description: String,
-    occurred: Option<String>,
+    occurred: Option<Stamp>,
     status: String,
     open: bool,
-    reviewed: Option<String>,
+    reviewed: Option<Reviewed>,
     note: Option<String>,
     others: Vec<Row>,
     /// Why this staff member cannot change the report, if they cannot.
@@ -211,15 +217,14 @@ async fn report_page(State(state): Shared, headers: HeaderMap, Path(id): Path<i6
         .into_iter()
         .map(Row::from)
         .collect();
-    let reviewed = r.reviewed_at.map(|at| {
-        format!(
-            "{} by {}",
-            when(at),
-            r.reviewed_by_email
-                .as_deref()
-                .filter(|e| !e.is_empty())
-                .unwrap_or("staff")
-        )
+    let reviewed = r.reviewed_at.map(|at| Reviewed {
+        at: stamp(at),
+        by: r
+            .reviewed_by_email
+            .as_deref()
+            .filter(|e| !e.is_empty())
+            .unwrap_or("staff")
+            .to_owned(),
     });
     let Nav {
         nav_csrf,
@@ -235,7 +240,7 @@ async fn report_page(State(state): Shared, headers: HeaderMap, Path(id): Path<i6
             role,
             is_admin,
             id,
-            filed: when(r.created_at),
+            filed: stamp(r.created_at),
             reporter: reporter_label(r.reporter_account, r.reporter_name.as_deref()),
             reporter_id: r.reporter_account,
             game_href: super::game::character_href(
@@ -246,7 +251,7 @@ async fn report_page(State(state): Shared, headers: HeaderMap, Path(id): Path<i6
             target_account,
             reason: Reason::label_of(&r.reason).to_owned(),
             description: r.description,
-            occurred: r.occurred_at.map(when),
+            occurred: r.occurred_at.map(stamp),
             open: r.status == Status::Open.as_str(),
             status: r.status,
             reviewed,

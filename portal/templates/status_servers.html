@@ -7,7 +7,7 @@
     </div>
     <span class="pill state-{{ s.state.as_str() }}">{{ crate::status::state_label(s.state.as_str()) }}</span>
   </div>
-  <p>{{ s.summary }}{% if s.worlds.is_empty() %}{% if let Some(t) = s.last_seen_text %} Last seen {{ t }}.{% endif %}{% endif %}</p>
+  <p>{{ s.summary }}{% if s.worlds.is_empty() %}{% if let Some(t) = s.last_seen_at %} Last seen {{ t }}.{% endif %}{% endif %}</p>
   {% if !s.worlds.is_empty() %}
   <dl class="status-facts">
     {% if let Some(t) = s.players_text %}<dt>Players online</dt><dd>{{ t }}</dd>{% endif %}

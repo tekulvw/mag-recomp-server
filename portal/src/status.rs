@@ -23,7 +23,7 @@ use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
 use crate::game_admin::{GameAdmin, GameAdminError, ServerStatus};
-use crate::web::{AppState, PageResult, Shared, current_session, page, when};
+use crate::web::{AppState, PageResult, Shared, Stamp, current_session, page, stamp, when};
 
 /// The actor the game server logs for status requests.
 pub const ACTOR: &str = "portal status page";
@@ -424,6 +424,9 @@ pub struct BannerView {
     pub restart_expected_at: Option<String>,
     pub restart_text: Option<String>,
     pub updated_at: String,
+    /// The restart time as pages show it.
+    #[serde(skip)]
+    pub restart: Option<Stamp>,
 }
 
 impl From<&Banner> for BannerView {
@@ -433,6 +436,7 @@ impl From<&Banner> for BannerView {
             restart_expected_at: b.restart_expected_at.map(rfc3339),
             restart_text: b.restart_expected_at.map(when),
             updated_at: rfc3339(b.updated_at),
+            restart: b.restart_expected_at.map(stamp),
         }
     }
 }
@@ -451,6 +455,9 @@ pub struct ServerView {
     /// When the server last answered.
     pub last_seen: Option<String>,
     pub last_seen_text: Option<String>,
+    /// The last answer's time as pages show it.
+    #[serde(skip)]
+    pub last_seen_at: Option<Stamp>,
     pub medius_version: Option<String>,
     pub gameplay_version: Option<String>,
     pub started_at: Option<String>,
@@ -565,6 +572,7 @@ pub fn server_view(
         summary: String::new(),
         last_seen: last_seen.map(rfc3339),
         last_seen_text: last_seen.map(when),
+        last_seen_at: last_seen.map(stamp),
         medius_version: None,
         gameplay_version: None,
         started_at: None,
@@ -763,19 +771,11 @@ pub fn banner_message(raw: &str) -> Option<String> {
     (!text.is_empty() && text.chars().count() <= MAX_BANNER).then_some(text)
 }
 
-/// A `datetime-local` form value (`2026-11-26T18:30`, seconds optional), read as UTC.
-/// `Ok(None)` for an empty value.
-pub fn restart_time(raw: &str) -> Result<Option<OffsetDateTime>, time::error::Parse> {
-    let raw = raw.trim();
-    if raw.is_empty() {
-        return Ok(None);
-    }
-    let minutes = time::macros::format_description!("[year]-[month]-[day]T[hour]:[minute]");
-    let seconds =
-        time::macros::format_description!("[year]-[month]-[day]T[hour]:[minute]:[second]");
-    time::PrimitiveDateTime::parse(raw, &minutes)
-        .or_else(|_| time::PrimitiveDateTime::parse(raw, &seconds))
-        .map(|t| Some(t.assume_utc()))
+/// The banner form's restart time: a `datetime-local` value (`2026-11-26T18:30`, seconds
+/// optional) in the time zone `tz` gives (`Date.getTimezoneOffset()`, which `static/time.js` fills
+/// in), or UTC without it. `Ok(None)` for an empty value.
+pub(crate) fn restart_time(raw: &str, tz: &str) -> Result<Option<OffsetDateTime>, ()> {
+    crate::web::form_instant(raw, tz)
 }
 
 // ---- Public routes ----
@@ -1304,10 +1304,24 @@ mod tests {
             Some(MAX_BANNER)
         );
         assert_eq!(banner_message(&"a".repeat(MAX_BANNER + 1)), None);
-        assert_eq!(restart_time("").unwrap(), None);
-        assert_eq!(restart_time("2027-01-15T08:10").unwrap(), Some(at(600)));
-        assert_eq!(restart_time("2027-01-15T08:10:00").unwrap(), Some(at(600)));
-        assert!(restart_time("tomorrow").is_err());
+        assert_eq!(restart_time("", "").unwrap(), None);
+        assert_eq!(restart_time("2027-01-15T08:10", "").unwrap(), Some(at(600)));
+        assert_eq!(
+            restart_time("2027-01-15T08:10:00", "").unwrap(),
+            Some(at(600))
+        );
+        // Typed in a browser five hours behind UTC; and one an hour ahead.
+        assert_eq!(
+            restart_time("2027-01-15T03:10", "300").unwrap(),
+            Some(at(600))
+        );
+        assert_eq!(
+            restart_time("2027-01-15T09:10", "-60").unwrap(),
+            Some(at(600))
+        );
+        assert!(restart_time("tomorrow", "").is_err());
+        assert!(restart_time("2027-01-15T08:10", "soon").is_err());
+        assert!(restart_time("2027-01-15T08:10", "1000").is_err());
         assert_eq!(duration_text(59), "0 min");
         assert_eq!(duration_text(3_660), "1 h 1 min");
         assert_eq!(duration_text(90_000), "1 d 1 h");

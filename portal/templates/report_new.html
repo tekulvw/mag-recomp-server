@@ -34,8 +34,8 @@
   <label>What happened
     <textarea name="description" rows="6" maxlength="{{ max_description }}" required>{{ description }}</textarea></label>
   <p class="quiet">At most {{ max_description }} characters. Say which match or map, and what you saw or heard.</p>
-  <label>About when (optional, your local time)
-    <input type="datetime-local" name="when" id="report-when" value="{{ when }}"></label>
+  <label>About when (optional, <span data-zone-for="report-when">UTC</span>)
+    <input type="datetime-local" name="when" id="report-when" value="{{ when }}" data-tz-field="report-tz"></label>
   <button>Send report</button>
 </form>
 {% endblock %}

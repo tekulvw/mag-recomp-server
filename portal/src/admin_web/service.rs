@@ -16,10 +16,11 @@ use axum::response::{IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use serde::Deserialize;
 
+use super::BanView;
 use super::{CsrfOnly, Nav, Reject, Staff, describe, internal, require_staff, require_staff_form};
 use crate::db::{self, ServiceCreateOutcome};
 use crate::staff::{self, Role};
-use crate::web::{AppState, PageResult, Shared, message, page, when};
+use crate::web::{AppState, PageResult, Shared, Stamp, message, page, stamp};
 
 const LIST: &str = "/admin/service-accounts";
 
@@ -38,15 +39,15 @@ pub(super) fn routes() -> Router<Arc<AppState>> {
 struct DeviceView {
     id: i32,
     label: String,
-    created: String,
-    last_used: String,
+    created: Stamp,
+    last_used: Stamp,
 }
 
 struct ServiceView {
     id: i32,
     name: String,
-    created: String,
-    ban: Option<String>,
+    created: Stamp,
+    ban: Option<BanView>,
     devices: Vec<DeviceView>,
 }
 
@@ -83,20 +84,17 @@ async fn render_list(state: &AppState, actor: &Staff, error: Option<String>) -> 
             .map(|d| DeviceView {
                 id: d.id,
                 label: d.label,
-                created: when(d.created_at),
-                last_used: d.last_used_at.map(when).unwrap_or_else(|| "never".into()),
+                created: stamp(d.created_at),
+                last_used: d.last_used_at.map_or_else(|| Stamp::text("never"), stamp),
             })
             .collect();
         accounts.push(ServiceView {
             id: a.id,
             name: a.player_name.clone().unwrap_or_default(),
-            created: when(a.created_at),
-            ban: a.banned_at.map(|at| {
-                format!(
-                    "since {}: {}",
-                    when(at),
-                    a.ban_reason.as_deref().unwrap_or("")
-                )
+            created: stamp(a.created_at),
+            ban: a.banned_at.map(|at| BanView {
+                since: stamp(at),
+                reason: a.ban_reason.clone().unwrap_or_default(),
             }),
             devices,
         });

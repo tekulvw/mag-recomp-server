@@ -446,6 +446,8 @@ async fn sign_in_link_and_ticket(_: PgPoolOptions, connect: PgConnectOptions) {
         html.contains("Test launcher (Linux)") && html.contains(&user_code),
         "{html}"
     );
+    // When it was requested, for the viewer's time zone.
+    assert_eq!(support::page_times(&html), 1, "{html}");
     let r = h
         .post_form(
             "/link/decide",
@@ -462,6 +464,13 @@ async fn sign_in_link_and_ticket(_: PgPoolOptions, connect: PgConnectOptions) {
     let (status, linked) = h.poll(&device_code).await;
     assert_eq!(status, StatusCode::OK, "{linked}");
     assert_eq!(linked["player_name"], "Alpha");
+    // The account page lists it with when it was linked; "never" used is words, not a time.
+    let account = page_html(h.get("/account", Some(&session)).await).await;
+    assert_eq!(support::page_times(&account), 1, "{account}");
+    assert!(
+        account.contains("UTC</time></td><td>never</td>"),
+        "{account}"
+    );
     let device_token = linked["device_token"].as_str().unwrap().to_owned();
     assert_eq!(
         h.poll(&device_code).await.1["error"],
@@ -892,7 +901,7 @@ async fn admin_panel_roles(_: PgPoolOptions, connect: PgConnectOptions) {
     // The configured owner grants roles; forms need the CSRF token; owner is not grantable.
     let o = h.sign_in("owner").await;
     let csrf_o = h.csrf(&o).await;
-    let page = h.get("/admin", Some(&o)).await.text().await.unwrap();
+    let page = page_html(h.get("/admin", Some(&o)).await).await;
     assert!(page.contains("signed in as owner"));
     assert!(
         h.get("/account", Some(&o))
@@ -947,8 +956,9 @@ async fn admin_panel_roles(_: PgPoolOptions, connect: PgConnectOptions) {
             .await;
         assert_eq!(r.status(), StatusCode::SEE_OTHER, "{email}");
     }
-    let staff = h.get("/admin/staff", Some(&o)).await.text().await.unwrap();
+    let staff = page_html(h.get("/admin/staff", Some(&o)).await).await;
     assert!(staff.contains("mod@example.test") && staff.contains("owner@example.test"));
+    assert!(support::page_times(&staff) > 0, "{staff}");
 
     // Moderators: view and ban players, nothing above them, no names or staff management.
     let m = h.sign_in("mod").await;
@@ -997,6 +1007,19 @@ async fn admin_panel_roles(_: PgPoolOptions, connect: PgConnectOptions) {
             .unwrap()
             .is_banned()
     );
+    // The user page says since when, as a time, and the reason as text.
+    let banned = page_html(h.get(&format!("/admin/users/{player}"), Some(&m)).await).await;
+    assert!(
+        banned.contains("<strong>banned</strong> since <time class=\"local-time\" datetime=\"")
+            && banned.contains(" UTC</time>: griefing</dd>"),
+        "{banned}"
+    );
+    assert!(
+        support::page_times(&banned) >= 2,
+        "joined and banned: {banned}"
+    );
+    let users = page_html(h.get("/admin/users?q=unif", Some(&m)).await).await;
+    assert!(support::page_times(&users) >= 1, "{users}");
     let owner = id_of(&h, "owner").await;
     let admin = id_of(&h, "mod").await;
     for target in [owner, admin] {
@@ -1175,8 +1198,9 @@ async fn admin_panel_roles(_: PgPoolOptions, connect: PgConnectOptions) {
         "Uniform"
     );
 
-    // Every change is in the audit log, newest first.
-    let log = h.get("/admin", Some(&o)).await.text().await.unwrap();
+    // Every change is in the audit log, newest first, each with its time.
+    let log = page_html(h.get("/admin", Some(&o)).await).await;
+    assert!(support::page_times(&log) >= 5, "{log}");
     for action in [
         "grant role",
         "ban",
@@ -1487,13 +1511,10 @@ async fn service_accounts_in_the_admin_panel(_: PgPoolOptions, connect: PgConnec
     verify_issued(&h, &issued, AUDIENCE).await.unwrap();
 
     // Moderators see service accounts but cannot change them.
-    let list = h
-        .get("/admin/service-accounts", Some(&m))
-        .await
-        .text()
-        .await
-        .unwrap();
+    let list = page_html(h.get("/admin/service-accounts", Some(&m)).await).await;
     assert!(list.contains("PlayerLinux") && list.contains("linux-ci"));
+    // Created, and each token's minted and last-used times.
+    assert!(support::page_times(&list) >= 3, "{list}");
     assert!(!list.contains("Mint token") && !list.contains("Revoke"));
     let user_page = h
         .get(&format!("/admin/users/{}", svc.id), Some(&m))
@@ -1950,6 +1971,68 @@ async fn stylesheet_address_changes_with_its_content(_: PgPoolOptions, connect: 
     test_db.close().await;
 }
 
+/// The page check the other tests run: what it accepts and what it refuses.
+#[test]
+fn page_time_check() {
+    let instant = "<time class=\"local-time\" datetime=\"2026-11-28T05:25:47Z\" \
+                   title=\"2026-11-28 05:25:47 UTC\">2026-11-28 05:25 UTC</time>";
+    let page = format!(
+        "<p data-generated=\"2026-11-28T05:25:47.5Z\">{instant} \
+         <time datetime=\"2026-11-28\">2026-11-28</time> 2026-11-28 05:25 UTC 18:30</p>"
+    );
+    assert_eq!(support::page_times(&page), 2);
+    assert_eq!(support::page_times("<p>No times.</p>"), 0);
+    for bad in [
+        "<td>2026-11-28 05:25</td>",
+        "<td>2026-11-28T05:25:47</td>",
+        "<time>2026-11-28 05:25 UTC</time>",
+        "<time class=\"local-time\" datetime=\"2026-11-28T05:25:47\">x UTC</time>",
+        "<time class=\"local-time\" datetime=\"2026-11-28T05:25:47Z\">Nov 28</time>",
+        "<time datetime=\"2026-11-28T05:25:47Z\">2026-11-28 05:25 UTC</time>",
+    ] {
+        assert!(
+            std::panic::catch_unwind(|| support::page_times(bad)).is_err(),
+            "{bad}"
+        );
+    }
+}
+
+/// Every page loads the time script from the site itself (the policy allows no inline script),
+/// at an address that changes with its content.
+#[sqlx::test]
+async fn time_script_on_every_page(_: PgPoolOptions, connect: PgConnectOptions) {
+    let (pool, test_db) = support::pool(connect).await;
+    let h = harness(pool).await;
+    let version = mag_portal::web::time_script_version();
+    for path in ["/", "/privacy", "/status"] {
+        let html = page_html(h.get(path, None).await).await;
+        assert!(
+            html.contains(&format!(
+                "<script src=\"/time.js?v={version}\" defer></script>"
+            )),
+            "{path}: {html}"
+        );
+    }
+    let r = h.get(&format!("/time.js?v={version}"), None).await;
+    assert_eq!(r.status(), StatusCode::OK);
+    assert!(
+        r.headers()["content-type"]
+            .to_str()
+            .unwrap()
+            .starts_with("text/javascript")
+    );
+    assert_eq!(
+        r.headers()["cache-control"],
+        "public, max-age=31536000, immutable"
+    );
+    let script = r.text().await.unwrap();
+    // It only sets text and titles: nothing is ever parsed as HTML.
+    assert!(script.contains("Intl.DateTimeFormat") && !script.contains("innerHTML"));
+    let r = h.get("/time.js", None).await;
+    assert_eq!(r.headers()["cache-control"], "public, max-age=300");
+    test_db.close().await;
+}
+
 // ---- Game server section, against a fake Medius admin API ----
 
 const GAME_SECRET: &[u8] = b"game-admin-test-secret-0123456789abcdef";
@@ -2269,8 +2352,21 @@ async fn fake_medius_server() -> (Arc<FakeMedius>, String) {
     (medius, format!("http://{addr}"))
 }
 
+/// A response's status and body; a page's times are checked on the way (see `page_times`).
 async fn body(r: reqwest::Response) -> (StatusCode, String) {
-    (r.status(), r.text().await.unwrap())
+    let status = r.status();
+    let text = r.text().await.unwrap();
+    if text.starts_with("<!doctype html>") {
+        support::page_times(&text);
+    }
+    (status, text)
+}
+
+/// A page's HTML, with its times checked.
+async fn page_html(r: reqwest::Response) -> String {
+    let text = r.text().await.unwrap();
+    support::page_times(&text);
+    text
 }
 
 #[sqlx::test]
@@ -2810,7 +2906,10 @@ async fn game_server_character_slots(_: PgPoolOptions, connect: PgConnectOptions
     );
     assert!(page.contains("<h2>Slot 0 · Alpha</h2>"));
     assert!(page.contains("href=\"/admin/game/characters/alpha?slot=2\">AlphaTwo</a>"));
-    assert!(page.contains("<span class=\"pill\">deleted</span> 2026-11-20T08:30:00Z"));
+    assert!(page.contains(
+        "<span class=\"pill\">deleted</span> <time class=\"local-time\" \
+         datetime=\"2026-11-20T08:30:00Z\" title=\"2026-11-20 08:30:00 UTC\">2026-11-20 08:30 UTC</time>"
+    ));
     assert!(page.contains("<input type=\"hidden\" name=\"slot\" value=\"0\">"));
 
     let (status, page) = body(h.get("/admin/game/characters/alpha?slot=2", Some(&o)).await).await;
@@ -3684,6 +3783,9 @@ async fn report_comments(_: PgPoolOptions, connect: PgConnectOptions) {
     let (status, list) = body(h.get("/admin/reports", Some(&m)).await).await;
     assert_eq!(status, StatusCode::OK);
     assert!(list.contains(&with_id) && list.contains(&odd_id), "{list}");
+    // 14 UTC days, which never shift, and each report's received time.
+    assert!(support::page_times(&list) >= 14 + 2, "{list}");
+    assert!(list.contains("<th>Day (UTC)</th>"));
     assert!(
         list.contains("Stutter at the &#60;b&#62;gate&#60;/b&#62; &#38;")
             && !list.contains("<b>gate"),
@@ -3695,6 +3797,7 @@ async fn report_comments(_: PgPoolOptions, connect: PgConnectOptions) {
     assert!(filtered.contains("<option value=\"yes\" selected>"));
     let (status, detail) = body(h.get(&format!("/admin/reports/{with_id}"), Some(&m)).await).await;
     assert_eq!(status, StatusCode::OK);
+    assert_eq!(support::page_times(&detail), 1, "received: {detail}");
     assert!(
         detail.contains(
             "<p class=\"comment\">Stutter at the &#60;b&#62;gate&#60;/b&#62; &#38; &#34;spawn&#34;\n[31msecond line\nthird \u{4e2d}\u{6587} line, long enough to need cutting short</p>"
@@ -4445,14 +4548,67 @@ async fn maintenance_banner(_: PgPoolOptions, connect: PgConnectOptions) {
         .await;
     assert_eq!(r.status(), StatusCode::SEE_OTHER);
 
-    // Shown publicly at once, without signing in.
+    // Shown publicly at once, without signing in: in UTC, labelled, for the time script.
     for path in ["/", "/status"] {
         let (_, page) = body(h.get(path, None).await).await;
         assert!(
-            page.contains(message) && page.contains("2030-01-02 18:30 UTC"),
+            page.contains(message)
+                && page.contains(
+                    "Back by <time class=\"local-time\" datetime=\"2030-01-02T18:30:00Z\" \
+                     title=\"2030-01-02 18:30:00 UTC\">2030-01-02 18:30 UTC</time>."
+                ),
             "{path}: {page}"
         );
     }
+    // The form holds it in UTC for the script to show in local time, and says the zone.
+    let (_, page) = body(h.get("/admin/status", Some(&o)).await).await;
+    assert!(
+        page.contains("value=\"2030-01-02T18:30\" data-utc data-tz-field=\"restart-tz\"")
+            && page.contains("<span data-zone-for=\"restart-at\">UTC</span>"),
+        "{page}"
+    );
+    // Typed in local time five hours behind UTC, as the script sends it: the same instant.
+    let r = h
+        .post_form(
+            "/admin/status/banner",
+            &o,
+            &[
+                ("csrf", &csrf_o),
+                ("message", message),
+                ("restart_at", "2030-01-02T13:30"),
+                ("tz", "300"),
+            ],
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::SEE_OTHER);
+    assert_eq!(
+        mag_portal::status::load_banner(&pool)
+            .await
+            .unwrap()
+            .unwrap()
+            .restart_expected_at,
+        Some(time::macros::datetime!(2030-01-02 18:30 UTC))
+    );
+    // A refused form comes back with the time in UTC, as the field holds it.
+    let (code, page) = body(
+        h.post_form(
+            "/admin/status/banner",
+            &o,
+            &[
+                ("csrf", &csrf_o),
+                ("message", " "),
+                ("restart_at", "2030-01-02T13:30"),
+                ("tz", "300"),
+            ],
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(code, StatusCode::BAD_REQUEST);
+    assert!(
+        page.contains("value=\"2030-01-02T18:30\" data-utc"),
+        "{page}"
+    );
     let json: Value = h.get("/api/v1/status", None).await.json().await.unwrap();
     assert_eq!(json["banner"]["message"], message);
     assert_eq!(
@@ -4460,7 +4616,9 @@ async fn maintenance_banner(_: PgPoolOptions, connect: PgConnectOptions) {
         "2030-01-02T18:30:00Z"
     );
     let (_, dashboard) = body(h.get("/admin", Some(&o)).await).await;
+    // The audit log keeps its text, with the time labelled UTC, and its own time to show.
     assert!(dashboard.contains("set status banner"));
+    assert!(dashboard.contains("(restart expected 2030-01-02 18:30 UTC)"));
 
     // A restarted portal loads it from the database.
     let fresh = StatusService::new(Vec::new(), StdDuration::from_secs(15));
@@ -4744,6 +4902,8 @@ async fn game_server_voice_moderation(_: PgPoolOptions, connect: PgConnectOption
     let (_, page) = body(h.get("/admin/game", Some(&m)).await).await;
     assert!(page.contains("Voice mutes and bans") && page.contains("synthetic spam"));
     assert!(page.contains("until lifted"));
+    // Since, from the game server's UTC time.
+    assert!(page.contains("datetime=\"2026-11-27T12:00:00Z\""), "{page}");
     let (_, page) = body(h.get("/admin/game/characters/alpha", Some(&m)).await).await;
     assert!(page.contains("Lift mute") && page.contains("value=\"unmute\""));
     assert!(!page.contains("Lift ban"));
