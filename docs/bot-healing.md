@@ -54,14 +54,23 @@ grounded and not on another job.
   approach.
 - **One medic per patient:** a medic serves one patient, and a patient has
   one medic. At most four new routes start per tick, nearest pairs first.
+- **Only walkable approaches:** a medic is sent only when it stands on the
+  patient's navmesh walking component and the planned route takes no
+  passage (it holds no permit, so it would stop there) and is at most twice
+  the radius long. Otherwise that medic is not sent to that patient again
+  during the patient's downed life.
 - **Walk and revive:** the medic walks the navmesh to the patient and stops
   once the patient is well inside its medkit's sphere. The ordinary medkit
   use above then revives the patient.
+- **Resuming:** the medic keeps its objective task through the approach and
+  resumes it afterwards, and a revived bot resumes the task it had when it
+  went down: both keep their destination and only plan the route there
+  again.
 - **Release:** the approach ends, and the medic returns to its objective,
   when the patient is revived or bleeds out, when the medic dies or goes
   down, when it takes a higher duty, or when it gets no closer for 6 s. After
-  that last case, or a route that cannot be planned, the same medic is not
-  sent to the same patient for 6 s.
+  that last case the same medic is not sent to the same patient again during
+  that downed life.
 
 The downed bot's own wait is unchanged: it still checks for a medic within
 30 m at 10 s and every second after, and a medic on its way counts.
