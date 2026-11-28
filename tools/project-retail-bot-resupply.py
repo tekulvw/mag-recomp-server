@@ -15,7 +15,8 @@ SHARED = runpy.run_path(str(TOOLS / "extract-retail-objective-volumes.py"))
 HELPERS = runpy.run_path(str(TOOLS / "retail_map_helpers.py"))
 SABOTAGE_MAPS = runpy.run_path(str(TOOLS / "project-retail-sabotage-objectives.py"))["SABOTAGE_MAPS"]
 HUMAN = runpy.run_path(str(Path(__file__).resolve().parent / "project-retail-human-resupply.py"))
-ACQDOM_MAPS = HUMAN["MAPS"]
+# The human table also lists Sabotage maps; their bot pins come from SABOTAGE_MAPS.
+ACQDOM_MAPS = {name: level for name, level in HUMAN["MAPS"].items() if level.mode != 0}
 DEFAULT_MAP = "mag_cosmodrome_final"
 # Sabotage keeps its explicit visible, unfrozen, unsnapped allowlist. On the
 # Acquisition and Domination maps that allowlist selects nothing on Canal and
