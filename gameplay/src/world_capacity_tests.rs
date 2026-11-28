@@ -545,3 +545,149 @@ fn a_deploy_screen_joiner_in_a_full_256_bot_world_keeps_objective_state() {
     assert!(drained >= (limit - 8 + 20 + 254) as u64, "{drained}");
     assert_eq!(engine.bot_registry.known_bots(&id), Some(&bots(&engine)));
 }
+
+/// A busy world's bot publication: each tick a quarter of the bots publish a
+/// Character health delta, so every bot publishes five times a second, as
+/// moving and fighting bots do.
+fn publish_bots(engine: &mut Engine<Vec<u8>>, now: u64) {
+    let indices: Vec<u16> = bots(engine)
+        .into_iter()
+        .filter(|index| u64::from(*index) % 4 == now / 50 % 4)
+        .collect();
+    for index in indices {
+        let damage = engine.bot_registry.bots[&index].damage;
+        let packet = replication::CharacterDamageUpdate {
+            seated_exit: None,
+            sequence: 2,
+            timestamp_ms: now as u32,
+            object_index: index,
+            damage,
+            forced_state: None,
+        }
+        .encode_with_profile(engine.wire_profile)
+        .unwrap();
+        engine.broadcast_bot_state_packet(index, packet);
+    }
+}
+
+/// Ticks a busy world from `from_ms` to `to_ms`, keeping the humans' clients
+/// talking, and returns the deepest ordinary queue `player` reached. Panics
+/// if `player` is evicted.
+fn run_busy(engine: &mut Engine<Vec<u8>>, from_ms: u64, to_ms: u64, player: u16) -> usize {
+    engine.enable_world_ticks();
+    let mut deepest = 0;
+    let mut now = from_ms;
+    while now < to_ms {
+        now += 50;
+        publish_bots(engine, now);
+        for actor in engine.peers.values_mut().chain(engine.active.iter_mut()) {
+            actor.last_event = Duration::from_millis(now);
+        }
+        let response = engine.tick_world(Duration::from_millis(now), 1, "synthetic-tick".into());
+        assert!(response.ok, "{:?}", response.error);
+        let Some(actor) = human(engine, player) else {
+            panic!("human {player} was evicted at {now} ms");
+        };
+        assert!(!actor.replication_backlogged, "backlogged at {now} ms");
+        deepest = deepest.max(actor.ordinary_shared_len());
+    }
+    deepest
+}
+
+/// The live rejoin of a full 256-character Domination world: the rejoiner's
+/// client is ready and holds its hospital creation, so its FIFO drains, but
+/// each reply carries only its per-recipient allowance (16 messages, 6,144
+/// bytes, a few whole snapshots) while the world's bots keep publishing.
+/// Handing it all 255 snapshots at once queued every bot's deltas behind them,
+/// filled its 768-frame bound and evicted it (replication_backlog_released,
+/// then no_reservation on its next event). It now takes the snapshots in
+/// drained batches, gets a bot's deltas only after that bot's snapshot, stays
+/// well below its bound and ends up holding every bot.
+#[test]
+fn a_rejoiner_catching_up_with_a_busy_full_256_bot_world_is_not_evicted() {
+    let mut engine = engine(DOMINATION_256, 256);
+    engine.per_recipient_reply_budget = true;
+    engine.coalesce_character_replication = true;
+    engine.bunker_world = crate::structures::domination_bunker_seat_tests::fixture()
+        .bunker_world
+        .take();
+    crate::hospital_turrets::tests::enable_synthetic_hospital_turrets(&mut engine);
+    assert!(reserve(&mut engine, 0, 0).ok);
+    {
+        let resident = human(&mut engine, 0).unwrap();
+        crate::spawn_progression::tests::ready(resident);
+        resident.emplacement_creation = Some(Vec::new());
+    }
+    reconcile(&mut engine, 0);
+    let now = run(&mut engine, 0, 3_000);
+    assert_eq!(engine.bot_registry.bots.len(), 255);
+    // A resident holding every bot keeps up with this traffic.
+    assert!(run_busy(&mut engine, now, 6_000, 0) < 64);
+
+    // The previous life's reservation is gone; the same human rejoins.
+    assert!(reserve(&mut engine, 1, 1).ok);
+    let (id, limit) = {
+        let joiner = human(&mut engine, 1).unwrap();
+        crate::spawn_progression::tests::ready(joiner);
+        joiner.emplacement_creation = Some(Vec::new());
+        (joiner.reservation.id.clone(), joiner.shared_queue_limit)
+    };
+    assert_eq!(limit, 768);
+    let deepest = run_busy(&mut engine, 6_000, 6_050, 1);
+    let first = engine.bot_registry.known_bots(&id).map_or(0, |b| b.len());
+    assert!(
+        0 < first && first < 255,
+        "first pass snapshotted {first} bots"
+    );
+    let deepest = deepest.max(run_busy(&mut engine, 6_050, 16_000, 1));
+    assert!(records(&engine, "replication_backlog_released").is_empty());
+    assert!(deepest < limit / 2, "deepest queue {deepest} of {limit}");
+    assert_eq!(engine.bot_registry.known_bots(&id), Some(&bots(&engine)));
+    assert!(!human(&mut engine, 0).unwrap().replication_backlogged);
+}
+/// A bot's own deltas reach only the recipients holding its snapshot.
+#[test]
+fn bot_state_reaches_only_recipients_that_hold_its_snapshot() {
+    let mut engine = engine(DOMINATION_256, 256);
+    engine.bunker_world = crate::structures::domination_bunker_seat_tests::fixture()
+        .bunker_world
+        .take();
+    crate::hospital_turrets::tests::enable_synthetic_hospital_turrets(&mut engine);
+    assert!(reserve(&mut engine, 0, 0).ok);
+    {
+        let resident = human(&mut engine, 0).unwrap();
+        crate::spawn_progression::tests::ready(resident);
+        resident.emplacement_creation = Some(Vec::new());
+    }
+    reconcile(&mut engine, 0);
+    let id = engine.active.as_ref().unwrap().reservation.id.clone();
+    let index = *bots(&engine).iter().next().unwrap();
+    let frame = replication::multiplayer::CharacterRemoval {
+        sequence: 1,
+        timestamp_ms: 0,
+        player: 300,
+    }
+    .encode_with_profile(engine.wire_profile)
+    .unwrap();
+    // Admitted by the drain gate, but no snapshot of this bot yet.
+    assert!(engine.bot_registry.known_bots(&id).is_none());
+    engine.broadcast_bot_state_packet(index, frame.clone());
+    assert!(
+        !engine
+            .active
+            .as_ref()
+            .unwrap()
+            .pending_shared
+            .contains(&frame)
+    );
+    engine.bot_registry.known_for_test(&id).insert(index);
+    engine.broadcast_bot_state_packet(index, frame.clone());
+    assert!(
+        engine
+            .active
+            .as_ref()
+            .unwrap()
+            .pending_shared
+            .contains(&frame)
+    );
+}

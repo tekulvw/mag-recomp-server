@@ -1199,7 +1199,7 @@ impl<W: Write> Engine<W> {
         })
         .encode_with_profile(self.wire_profile)
         {
-            self.broadcast_bot_packet(packet);
+            self.broadcast_bot_state_packet(id, packet);
         }
     }
 

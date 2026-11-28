@@ -78,6 +78,15 @@ impl Active {
         }
     }
 
+    /// How many bot snapshots may join this recipient's queue now: enough to
+    /// fill it to a quarter of its bound. A legacy world's whole roster fits in
+    /// one pass from an empty queue, as before. In a full 256-character world a
+    /// joiner instead takes its snapshots over several ticks. Its queue then has
+    /// room for the deltas of the bots it already holds while the rest wait.
+    pub(crate) fn bot_snapshot_room(&self) -> usize {
+        (self.shared_queue_limit / 4).saturating_sub(self.ordinary_shared_len())
+    }
+
     pub(super) fn ordinary_shared_len(&self) -> usize {
         self.pending_shared
             .len()
