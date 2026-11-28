@@ -1,0 +1,30 @@
+name: 2.12 prerelease candidates
+
+on:
+  push:
+    branches: [codex/retail-v2.12]
+  workflow_dispatch:
+
+permissions: {}
+concurrency:
+  group: release-v212-candidates
+  cancel-in-progress: false
+
+jobs:
+  candidate:
+    if: github.ref == 'refs/heads/codex/retail-v2.12'
+    runs-on: mag-recomp-server
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+    steps:
+      - name: Prepare a prerelease PR for human review
+        uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
+        with:
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || github.token }}
+          target-branch: codex/retail-v2.12
+          config-file: release-please-v212-config.json
+          manifest-file: .release-please-v212-manifest.json
+          # The human owns candidate PR merges, tags and release publication.
+          skip-github-release: true

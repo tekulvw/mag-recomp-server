@@ -53,7 +53,7 @@ case "${1:-}" in
       esac
       # Release Please routing reads the config, manifest and every component version file.
       case "$path" in
-        release-please-config.json|.release-please-manifest.json|tests/release-routing.cjs|tests/pr-title.cjs|tools/check-pr-title.cjs|horizon/version.txt|gameplay/Cargo.toml|gameplay/Cargo.lock|portal/Cargo.toml|portal/Cargo.lock|charts/mag-recomp-server/Chart.yaml)
+        release-please-config.json|.release-please-manifest.json|release-please-v212-config.json|.release-please-v212-manifest.json|tests/release-routing.cjs|tests/release-routing-v212.cjs|tests/pr-title.cjs|tools/check-pr-title.cjs|horizon/version.txt|gameplay/Cargo.toml|gameplay/Cargo.lock|portal/Cargo.toml|portal/Cargo.lock|charts/mag-recomp-server/Chart.yaml)
           select_check release ;;
       esac
     done

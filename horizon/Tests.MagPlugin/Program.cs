@@ -28,6 +28,9 @@ void Test(string name, Action action)
     passed++;
 }
 
+Test("2.12 patch request vector and strict boundaries", Patch212Checks.Request);
+Test("2.12 patch completion split settings and terminal bit", Patch212Checks.Completion);
+
 Test("configured world registry validation and placement", ConfiguredRegistryChecks.Run);
 Test("configured registry simultaneous worlds and transfer", RegistryCoordinationChecks.Run);
 if (!string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable(RealRegistryWorkerChecks.BinaryVariable)))
