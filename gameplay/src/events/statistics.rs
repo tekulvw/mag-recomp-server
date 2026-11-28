@@ -457,12 +457,34 @@ pub(crate) fn plan_character_effect_consequences<W: Write>(
             && let Some(recipient) = progression::RewardRecipient::from_active(killer)
         {
             let reward = engine.frago_combat_reward(
-                recipient.bot_killed(victim_id, generation),
+                recipient.bot_killed_collapse(victim_id, generation, bot.revivals),
                 killer,
                 bot.target.runtime.map(|r| crate::frago::point(r.position)),
                 plan.frago_frame(engine),
             );
             plan.combat.new_rewards.push(reward);
+        }
+    } else if let Some(bot) = engine.bot_registry.bots.get(&victim_id)
+        && bot.downed.is_some_and(|d| !d.state.is_expired(now))
+        && matches!(life, Some(CharacterLife::AwaitingRespawn { .. }))
+        && let Some(killer) = humans().find(|a| {
+            a.reservation.world == world
+                && attacker == (0x0380_0000 | u32::from(a.reservation.player))
+        })
+    {
+        let team = bot.target.squad.team();
+        finished(&mut plan, killer, team);
+        if killer.team() != team
+            && let Some(recipient) = progression::RewardRecipient::from_active(killer)
+        {
+            plan.combat.new_rewards.push(recipient.event(
+                format!(
+                    "world-finish-{}-bot-{victim_id:04x}-{generation:08x}-{}",
+                    killer.reservation.id, bot.revivals
+                ),
+                progression::RewardKind::EnemyFinished,
+                1,
+            ));
         }
     }
     // A bot-only world has no human counters or XP recipients to publish.

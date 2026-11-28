@@ -121,8 +121,16 @@ pub(super) fn hit<W: Write>(
             && target.roster_published
             && ctx.engine.development_target_replication_enabled(active)
     });
+    // A downed bot, like a downed human, takes finishing damage at 0 HP.
+    let downed_bot = registry_target.and_then(|b| {
+        ctx.engine
+            .bot_registry
+            .bots
+            .get(&b.object_index)
+            .and_then(|bot| bot.downed)
+    });
     let target_health = registry_target
-        .filter(|b| b.health_quarter_points > 0)
+        .filter(|b| b.health_quarter_points > 0 || downed_bot.is_some())
         .map(|b| b.health_quarter_points)
         .or_else(|| {
             peer_target
@@ -253,6 +261,7 @@ pub(super) fn hit<W: Write>(
             ))?;
             let armor = if peer_target
                 .is_some_and(|p| matches!(p.life, CharacterLife::Incapacitated { .. }))
+                || downed_bot.is_some()
             {
                 armor.for_incapacitated(ctx.engine.item_catalog.retail_combat()?)?
             } else {
@@ -325,6 +334,37 @@ pub(super) fn hit<W: Write>(
             Err(code) => plan.gameplay_denial = Some(code),
             Ok(None) => (),
             Ok(Some((amount, mut damage))) => {
+                let mut bot_downed_after = None;
+                if let Some(bot) = registry_target {
+                    let (model, downed) =
+                        ctx.engine
+                            .plan_bot_damage(bot.object_index, amount, damage, now)?;
+                    damage = model;
+                    bot_downed_after = downed;
+                    if downed_bot.is_some_and(|d| !d.state.is_expired(now)) && downed.is_none() {
+                        statistics::finished(plan, active, bot.team);
+                        if bot.team != active.team()
+                            && let Some(recipient) =
+                                progression::RewardRecipient::from_active(active)
+                        {
+                            plan.combat.new_rewards.push(recipient.event(
+                                format!(
+                                    "finish-{}-bot-{:04x}-{:08x}-{}",
+                                    active.reservation.id,
+                                    bot.object_index,
+                                    bot.generation,
+                                    next_sequence
+                                ),
+                                progression::RewardKind::EnemyFinished,
+                                1,
+                            ));
+                        }
+                    }
+                }
+                // The initial collapse owns the kill; finishing a downed
+                // body adds no second kill, notice or K/D entry.
+                let collapsed =
+                    damage.health_quarter_points == 0 && target_health.is_some_and(|hp| hp > 0);
                 if let Some(peer) = peer_target {
                     let (model, life) = ctx.engine.plan_human_damage(peer, amount, damage, now)?;
                     damage = model;
@@ -367,7 +407,7 @@ pub(super) fn hit<W: Write>(
                 // ending window still admits damage. Leave the frozen counter
                 // alone instead of refusing the shot, as queued frags do.
                 if ordinary_retail_firearm
-                    && damage.health_quarter_points == 0
+                    && collapsed
                     && ctx.engine.match_terminal.is_none()
                     && let Some(bot) = registry_target
                 {
@@ -383,7 +423,7 @@ pub(super) fn hit<W: Write>(
                         }),
                     )?);
                 }
-                if damage.health_quarter_points == 0 && peer_target.is_none() {
+                if collapsed && peer_target.is_none() {
                     statistics::target_killed(
                         plan,
                         active,
@@ -393,13 +433,17 @@ pub(super) fn hit<W: Write>(
                         ),
                     );
                 }
-                if damage.health_quarter_points == 0
+                if collapsed
                     && let Some(bot) = registry_target
                     && active.team() != bot.team
                     && let Some(recipient) = progression::RewardRecipient::from_active(active)
                 {
                     let reward = ctx.engine.frago_combat_reward(
-                        recipient.bot_killed(bot.object_index, bot.generation),
+                        recipient.bot_killed_collapse(
+                            bot.object_index,
+                            bot.generation,
+                            ctx.engine.bot_revivals(bot.object_index),
+                        ),
                         active,
                         Some(crate::frago::point(bot.position)),
                         plan.frago_frame(ctx.engine),
@@ -453,9 +497,12 @@ pub(super) fn hit<W: Write>(
                     }
                     plan.replication.damage_delta = Some(packet.clone());
                 } else if let Some(bot) = registry_target {
-                    plan.combat
-                        .bot_damage
-                        .push((bot.object_index, bot.generation, damage));
+                    plan.combat.bot_damage.push((
+                        bot.object_index,
+                        bot.generation,
+                        damage,
+                        bot_downed_after,
+                    ));
                     plan.replication.damage_delta = Some(packet.clone());
                 } else {
                     plan.combat.dummy_health = Some(damage.health_quarter_points);

@@ -53,6 +53,7 @@ mod bot_demolition;
 mod bot_firearm_kd;
 pub mod bot_firearms;
 pub mod bot_healing;
+pub mod bot_incapacitation;
 pub mod bot_kits;
 pub mod bot_names;
 pub mod bot_navigation;
