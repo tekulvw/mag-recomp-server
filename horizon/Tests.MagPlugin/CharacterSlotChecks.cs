@@ -254,6 +254,92 @@ internal static partial class LeadershipProgressionChecks
         Check(MagMlsSession.FindCharacter(cards, byShown, _ => false)?.Name == "alpha!1", "Stored names still match first");
     }));
 
+    /// <summary>
+    /// After an in-game delete the client stays on character select with its MAS channel open and sends a
+    /// keepalive every 10 s; an unanswered one makes it drop the connection. The session must keep answering
+    /// and keep its signed-in phase, so the player can create another character and log in on it.
+    /// </summary>
+    public static void CharacterDeleteKeepsMasSession() => WithDirectory(directory => WithApplication(20231, () =>
+    {
+        var now = SlotNow.UtcDateTime;
+        var store = new LocalCharacterStore(Path.Combine(directory, "characters.json"), new PlainCommitter())
+            { ProgressionCatalog = Load(directory, Catalog()), Clock = () => SlotNow };
+        foreach (var name in new[] { "alpha!0", "alpha!1" }) Check(store.CreateForAccount(SlotRequest(name), "alpha").Result == MagNetResult.Success, name);
+        const int timeout = 30;
+
+        bool KeepAliveAnswered(MagMasSession session, DateTime at)
+        {
+            var replies = MasSend(session, new MagKeepAlive(), at);
+            return replies.Count == 1 && replies[0].PluginId == 0 &&
+                MagMessageCodec.TryParseForApplication(replies[0].Payload, 20231, out var echoed) && echoed is MagKeepAlive;
+        }
+        List<string> Listed()
+        {
+            var maps = new MagMapsSession { DevelopmentAuthEnabled = true, CharacterStorageEnabled = true, CharacterStore = store };
+            MapsSend(maps, new MagHello(), now);
+            var auth = new MagRetailNpAuthenticateRequest { TransactionId = 1, FullTicketSize = 5, TicketChunkSize = 5, LastMessage = true };
+            Encoding.ASCII.GetBytes("alpha").CopyTo(auth.TicketChunk, 0);
+            MapsSend(maps, auth, now);
+            MapsSend(maps, new MagRetailUniverseListRequest(), now);
+            MapsSend(maps, new MagNewsEulaRequest { Language = "english" }, now);
+            var replies = MapsSend(maps, new MagCharacterListRequest { TransactionId = 9 }, now);
+            MagMessage parsed = null;
+            Check(replies.Count == 1 && MagMessageCodec.TryParseForApplication(replies[0].Payload, 20231, out parsed) &&
+                parsed is MagRetailCharacterListResponse { Success: true }, "Character list after the delete: " + maps.StorageStatus);
+            return ((MagRetailCharacterListResponse)parsed).Characters.Where(c => c.AccountId != 0).Select(c => c.Name).ToList();
+        }
+
+        var registry = new MagLoginRegistry();
+        var mas = new MagMasSession { DevelopmentAuthEnabled = true, AccountLoginEnabled = true, CharacterDataEnabled = true,
+            CharacterStorageEnabled = true, CharacterStore = store, LoginRegistry = registry };
+        Check(MasSend(mas, new MagKeepAlive(), now).Count == 0, "A keepalive before the hello was answered");
+        MasSend(mas, new MagHello(), now);
+        MasSend(mas, new MagProtocolInfo { ProtocolVersion = Server.Medius.Program.Settings.MagProtocolVersion }, now);
+        var signIn = new MagRetailNpAuthenticateRequest { TransactionId = 1, FullTicketSize = 5, TicketChunkSize = 5, LastMessage = true };
+        Encoding.ASCII.GetBytes("alpha").CopyTo(signIn.TicketChunk, 0);
+        Check(MasSend(mas, signIn, now).Count == 1 && mas.State == MagMasSession.SessionState.LocalDevelopmentAuthenticated, "MAS sign-in");
+
+        // Delete, then the client's keepalives at 10 s intervals: each is echoed and the phase stays signed in.
+        uint deletedId = IdOf(store, "alpha", "alpha!1");
+        var deleted = MasSend(mas, new MagDeleteCharacterRequest { TransactionId = 21, CharacterName = "alpha!1", CharacterId = deletedId }, now);
+        Check(deleted.Count == 1 && MagMessageCodec.TryParseForApplication(deleted[0].Payload, 20231, out var deleteReply) &&
+            deleteReply is MagDeleteCharacterResponse { Success: true, TransactionId: 21 }, "Delete: " + mas.StorageStatus);
+        for (int seconds = 10; seconds <= 60; seconds += 10)
+        {
+            var at = now.AddSeconds(seconds);
+            Check(KeepAliveAnswered(mas, at), $"The keepalive {seconds} s after a delete went unanswered");
+            Check(mas.State == MagMasSession.SessionState.LocalDevelopmentAuthenticated && mas.AuthenticatedAccount == "alpha",
+                "A keepalive after a delete changed the MAS session: " + mas.State);
+            Check(!mas.IsExpired(at.AddSeconds(timeout - 1), timeout) && mas.IsPortalSessionLive(at.AddSeconds(timeout - 1)),
+                "MAS would close a session whose keepalives are answered");
+        }
+        Check(mas.IsExpired(now.AddSeconds(60 + timeout + 1), timeout), "A silent MAS session never expires");
+        var later = now.AddSeconds(60);
+
+        // A fresh list (the client reads it over MAPS) no longer shows the deleted character.
+        Check(Listed().SequenceEqual(new[] { "alpha!0" }), "The list after a delete still shows it: " + string.Join(",", Listed()));
+
+        // Re-create in the freed slot and log in on it, all in the same MAS session.
+        var created = MasSend(mas, SlotRequest("alpha!1"), later);
+        Check(created.Count == 1 && MagMessageCodec.TryParseForApplication(created[0].Payload, 20231, out var createReply) &&
+            createReply is MagCreateCharacterResponse { Result: MagNetResult.Success } && mas.State == MagMasSession.SessionState.CharacterCreated,
+            "Re-create after a delete in the same MAS session: " + mas.StorageStatus);
+        Check(KeepAliveAnswered(mas, later.AddSeconds(5)) && mas.State == MagMasSession.SessionState.CharacterCreated,
+            "A keepalive after the re-create went unanswered or changed the phase");
+        uint recreatedId = IdOf(store, "alpha", "alpha!1");
+        Check(recreatedId != deletedId, "The re-created character reused the deleted one's id");
+        var login = MasSend(mas, new MagRetailAccountLoginRequest { TransactionId = 2, VersionMajor = 3, VersionMinor = 3, VersionBuild = 1, AccountName = "alpha!1" }, later);
+        Check(login.Count == 1 && MagMessageCodec.TryParseForApplication(login[0].Payload, 20231, out var loginReply) &&
+            loginReply is MagRetailAccountLoginResponse { Result: 1 } granted && granted.AccountId == recreatedId &&
+            mas.State == MagMasSession.SessionState.AccountLoginSent, "Login on the re-created character: " + mas.StorageStatus);
+        var card = MasSend(mas, new MagCharacterDataRequest { TransactionId = 3, QueryKind = 2, AccountId = recreatedId, RequestId = 1 }, later);
+        Check(card.Count == 1 && MagMessageCodec.TryParseForApplication(card[0].Payload, 20231, out var data) &&
+            data is MagCharacterDataResponse { Success: true } served && served.Record.Name == "alpha!1" &&
+            mas.State == MagMasSession.SessionState.CharacterDataSent, "Character data for the re-created character: " + mas.StorageStatus);
+        Check(KeepAliveAnswered(mas, later.AddSeconds(10)), "A keepalive after the login went unanswered");
+        Check(Listed().SequenceEqual(new[] { "alpha!0", "alpha!1" }), "The list after the re-create: " + string.Join(",", Listed()));
+    }));
+
     static MagAdminApiRequest SignedSlot(string method, string path, DateTime now, string body = null)
     {
         byte[] secret = Encoding.UTF8.GetBytes("synthetic-admin-api-secret-0123456789abcdef");

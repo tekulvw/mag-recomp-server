@@ -171,6 +171,7 @@ Test("retail saved loadout delete commits and compacts the owned layout", Loadou
 Test("retail skill purchase owns its equipment for loadout saves", LoadoutPreferenceStoreChecks.RetailSkillPurchaseOwnsItsEquipment);
 Test("character slots: three per account, soft deletion with the name moved aside, restore and purge", LeadershipProgressionChecks.CharacterSlotStore);
 Test("character slots through MAPS and MAS: three allowed, slot positions, delete requests and login", LeadershipProgressionChecks.CharacterSlotSessions);
+Test("character delete keeps the MAS session: keepalives answered, re-create and login on the same channel", LeadershipProgressionChecks.CharacterDeleteKeepsMasSession);
 Test("character slots through mag-admin and the admin API: per-character targets, restore and purge", LeadershipProgressionChecks.CharacterSlotAdmin);
 Test("account-bound NP identity creation and persistence", NpIdentityChecks.Run);
 Test("MLS answers lobby player-card character data for any character", LeadershipProgressionChecks.PlayerCardLookup);

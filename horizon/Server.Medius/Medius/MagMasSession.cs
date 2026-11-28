@@ -66,6 +66,12 @@ namespace Server.Medius
             }
             switch (message)
             {
+                case MagKeepAlive _ when applicationId == 20231 && IsEstablished:
+                    // The retail client keeps MAS open on character select (after a delete, for one) and sends a
+                    // keepalive every 10 s; it closes the channel about 10 s after one goes unanswered. Echo it in
+                    // every phase after the hello, as MAPS and MLS do, without changing the phase.
+                    ObserveActivity(now);
+                    return Reply(applicationId, new MagKeepAlive());
                 case MagHello _ when State == SessionState.AwaitingHello:
                     State = SessionState.ProtocolInfoSent;
                     ObserveActivity(now);
@@ -162,8 +168,10 @@ namespace Server.Medius
                     (State == SessionState.LocalDevelopmentAuthenticated || State == SessionState.CharacterCreated) &&
                     MagDevelopmentAccountPolicy.HasZeroRsa(request):
                     {
-                        // The client connects to MAS for this request alone, as for creation. The store keeps the
-                        // character (soft deletion); the client sees it leave the list either way.
+                        // The client opens MAS for this request, as for creation, but then stays on character select
+                        // with the channel open: the session keeps its signed-in phase, so keepalives, another create,
+                        // another delete and the account login all go on working. The store keeps the character (soft
+                        // deletion); the client sees it leave the list either way.
                         bool deleted = false;
                         try
                         {

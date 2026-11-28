@@ -27,6 +27,12 @@ one there. Before this change an account held one character.
   bytes) and its id (uint32). The answer, `0x023D`, is the common header and one success bit. Both
   layouts are the same in the prototype and the retail v1.0 client. Retail's server deleted the
   character.
+- **The client stays connected after a delete.** Unlike creation, which goes straight on to the
+  account login, a delete leaves the client on character select with its MAS channel open. It
+  sends a keepalive (`0x0003`, a bare message type) every 10 s and drops the connection ("The
+  connection to the game universe was lost (2:4)") about 10 s after one goes unanswered. The
+  server echoes each keepalive and keeps the session signed in, so the player can create another
+  character and log in on the same channel.
 
 ## What this server does
 
