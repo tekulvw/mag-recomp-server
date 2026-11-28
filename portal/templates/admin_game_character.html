@@ -14,13 +14,13 @@
 <p>The account's characters, one per slot. Open one to see it{% if is_admin %} or set its level{% endif %}. A deleted character keeps its name reserved; operators restore or purge it with <code>mag-admin</code>.</p>
 <div class="table-scroll">
 <table>
-  <thead><tr><th>Slot</th><th>Character</th><th>Faction</th><th>Level</th><th>XP</th><th>Skill points</th><th>Deleted</th></tr></thead>
+  <thead><tr><th>Slot</th><th>Character</th><th>Faction</th><th>Level</th><th>XP</th><th>Skill points</th><th>Respec points</th><th>Deleted</th></tr></thead>
   <tbody>
   {% for x in characters %}
   <tr>
     <td>{{ x.slot }}</td>
     <td>{% if x.selected %}<strong>{{ x.name }}</strong> <span class="quiet">(shown below)</span>{% else if x.deleted_at.is_some() %}{{ x.name }}{% else %}<a href="/admin/game/characters/{{ account|urlencode_strict }}?slot={{ x.slot }}">{{ x.name }}</a>{% endif %}</td>
-    <td>{{ x.faction }}</td><td>{{ x.level }}</td><td>{{ x.experience }}</td><td>{{ x.skill_points }}</td>
+    <td>{{ x.faction }}</td><td>{{ x.level }}</td><td>{{ x.experience }}</td><td>{{ x.skill_points }}</td><td>{{ x.respec_points }}</td>
     <td>{% if let Some(at) = x.deleted_at %}<span class="pill">deleted</span>{% if !at.is_empty() %} {{ at }}{% endif %}{% endif %}</td>
   </tr>
   {% endfor %}
@@ -35,6 +35,7 @@
   <dt>XP</dt><dd>{{ c.experience }}</dd>
   <dt>Next level at</dt><dd>{{ c.next_level }}</dd>
   <dt>Skill points</dt><dd>{{ c.skill_points }}</dd>
+  {% if !c.respec.is_empty() %}<dt>Respec</dt><dd>{{ c.respec }}</dd>{% endif %}
   <dt>Session</dt><dd>{% if c.session == "online" %}<strong>online</strong>{% else %}{{ c.session }}{% endif %}</dd>
 </dl>
 <h2>Voice</h2>

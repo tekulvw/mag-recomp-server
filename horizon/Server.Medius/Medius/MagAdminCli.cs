@@ -347,6 +347,7 @@ is online, and without --apply they are dry runs too.";
             output.WriteLine($"level:        {c.Level}");
             output.WriteLine($"experience:   {c.Experience}");
             output.WriteLine($"skill points: {c.SkillPoints}");
+            output.WriteLine($"respec:       {RespecSummary(c)}");
             if (c.HasProgressionCatalog)
                 output.WriteLine(c.NextLevel != null
                     ? $"next level:   {c.NextLevel} at {c.NextLevelExperience} XP"
@@ -360,9 +361,14 @@ is online, and without --apply they are dry runs too.";
         {
             output.WriteLine("characters:");
             foreach (var x in characters)
-                output.WriteLine($"  slot {x.Slot}  {x.CharacterId,4} {x.Name,-20} faction {x.Faction}  level {x.Level,3}" +
+                output.WriteLine($"  slot {x.Slot}  {x.CharacterId,4} {x.Name,-20} faction {x.Faction}  level {x.Level,3}  respec points {x.RespecPoints,6}" +
                     (x.Deleted ? $"  deleted {Time(x.DeletedAt)}" : ""));
         }
+
+        /// <summary>"3000 points (stored 0, floor applied), 1 taken, next costs 5000".</summary>
+        static string RespecSummary(MagAdminAccount c) =>
+            $"{c.RespecPoints} points" + (c.RespecPoints != c.StoredRespecPoints ? $" (stored {c.StoredRespecPoints}, floor applied)" : "") +
+            $", {c.RespecCount} taken" + (c.NextRespecFee is uint fee ? $", next costs {fee}" : "");
 
         private static int RestoreOrPurge(LocalCharacterStore store, string action, string account, string name, bool apply, string backupDirectory,
             TextWriter output, TextWriter error)

@@ -66,6 +66,11 @@ runtime:
   # not characters that completed Training earlier. Requires the progression and
   # Training-completion catalogs. Unset keeps the Training XP bonus alone.
   trainingLevel: null
+  # Optional minimum respec points for every character (MAG_RESPEC_POINTS_FLOOR),
+  # applied whenever a character's record is built, so a respec's spend is topped
+  # back up; a higher stored balance is kept. Applied on read; no row is rewritten.
+  # Unset leaves balances as stored (docs/skill-respec.md).
+  respecPointsFloor: null
   # Optional hours (1-720) an open match reward row may go without a reward
   # before compaction may evict it (MAG_REWARD_LEDGER_OPEN_MATCH_TTL_HOURS).
   # Unset keeps Medius's 24 hour default.

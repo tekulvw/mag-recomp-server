@@ -385,7 +385,8 @@ namespace Server.Medius
             accounts = MagAdminOperations.ListAccounts(_store, _markerDirectory, now).Select(c => new
             {
                 account = c.Account, level = c.Level, experience = c.Experience, skill_points = c.SkillPoints, session = c.Session,
-                character_id = c.CharacterId, name = c.Name, slot = c.Slot, faction = c.Faction, deleted = c.Deleted, deleted_at = Time(c.DeletedAt)
+                character_id = c.CharacterId, name = c.Name, slot = c.Slot, faction = c.Faction, deleted = c.Deleted, deleted_at = Time(c.DeletedAt),
+                respec_points = c.RespecPoints, respec_count = c.RespecCount
             })
         });
 
@@ -437,11 +438,14 @@ namespace Server.Medius
             {
                 account = c.Account, level = c.Level, experience = c.Experience, skill_points = c.SkillPoints,
                 next_level_experience = c.NextLevelExperience, session = c.Session,
+                respec_points = c.RespecPoints, stored_respec_points = c.StoredRespecPoints, respec_count = c.RespecCount,
+                next_respec_fee = c.NextRespecFee,
                 character_id = c.CharacterId, name = c.Name, slot = c.Slot, faction = c.Faction,
                 characters = MagAdminOperations.Characters(_store, account, _markerDirectory, now).Select(x => new
                 {
                     character_id = x.CharacterId, name = x.Name, slot = x.Slot, faction = x.Faction, level = x.Level,
-                    experience = x.Experience, skill_points = x.SkillPoints, deleted = x.Deleted, deleted_at = Time(x.DeletedAt)
+                    experience = x.Experience, skill_points = x.SkillPoints, deleted = x.Deleted, deleted_at = Time(x.DeletedAt),
+                    respec_points = x.RespecPoints, respec_count = x.RespecCount
                 })
             });
         }

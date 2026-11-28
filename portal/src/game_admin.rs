@@ -154,6 +154,15 @@ pub struct Character {
     pub faction: Option<u8>,
     #[serde(default)]
     pub characters: Vec<AccountCharacter>,
+    /// Respec points the character can spend (its balance raised to any operator floor), respecs
+    /// taken and the next respec's fee. `None` from a game server that predates respecs; the fee is
+    /// also `None` when the server has no respec fees.
+    #[serde(default)]
+    pub respec_points: Option<i64>,
+    #[serde(default)]
+    pub respec_count: Option<i64>,
+    #[serde(default)]
+    pub next_respec_fee: Option<i64>,
 }
 
 /// One of an account's characters, live or deleted, in [`Character::characters`].
@@ -171,6 +180,9 @@ pub struct AccountCharacter {
     /// UTC `YYYY-MM-DDTHH:MM:SSZ`.
     #[serde(default)]
     pub deleted_at: Option<String>,
+    /// Respec points the character can spend; `None` from a game server that predates respecs.
+    #[serde(default)]
+    pub respec_points: Option<i64>,
 }
 
 /// A level change, planned (`applied: false`) or made.
@@ -1148,6 +1160,24 @@ mod tests {
         assert_eq!(new.characters.len(), 3);
         assert!(new.characters[2].deleted);
         assert_eq!(new.characters[0].faction, 1);
+        assert!(new.respec_points.is_none() && new.characters[0].respec_points.is_none());
+
+        let respec: Character = serde_json::from_slice(
+            br#"{"account":"alpha","level":5,"experience":1,"skill_points":2,"next_level_experience":null,
+                 "session":"offline","respec_points":3000,"respec_count":1,"next_respec_fee":5000,
+                 "characters":[{"character_id":11,"name":"Alpha","slot":0,"faction":1,"level":5,
+                    "experience":100,"skill_points":2,"respec_points":3000}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            (
+                respec.respec_points,
+                respec.respec_count,
+                respec.next_respec_fee
+            ),
+            (Some(3000), Some(1), Some(5000))
+        );
+        assert_eq!(respec.characters[0].respec_points, Some(3000));
     }
 
     #[test]

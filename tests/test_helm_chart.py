@@ -270,6 +270,18 @@ class ChartTests(unittest.TestCase):
         for invalid in (0, 256, '3', [3]):
             render({'runtime': {'trainingLevel': invalid}}, ok=False)
 
+    def test_optional_respec_points_floor(self):
+        def medius_env(docs):
+            return [{e['name']: e.get('value') for e in c.get('env', [])}
+                    for d in docs if d['kind'] == 'Deployment'
+                    for c in d['spec']['template']['spec']['containers'] if c['name'] in ('medius', 'maps')]
+        self.assertTrue(all('MAG_RESPEC_POINTS_FLOOR' not in env for env in medius_env(render())))
+        for floor in (3000, 4294967295):
+            envs = medius_env(render({'runtime': {'respecPointsFloor': floor}}))
+            self.assertTrue(len(envs) >= 2 and all(env.get('MAG_RESPEC_POINTS_FLOOR') == str(floor) for env in envs))
+        for invalid in (-1, 4294967296, '3000', [3000], 1.5):
+            render({'runtime': {'respecPointsFloor': invalid}}, ok=False)
+
     def test_optional_reward_ledger_open_match_ttl(self):
         def medius_env(docs):
             return [{e['name']: e.get('value') for e in c.get('env', [])}

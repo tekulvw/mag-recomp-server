@@ -287,6 +287,8 @@ struct CharacterView {
     experience: i64,
     skill_points: i64,
     next_level: String,
+    /// "3000 points, 1 taken, next costs 5000"; empty from a game server that predates respecs.
+    respec: String,
     session: &'static str,
 }
 
@@ -298,6 +300,8 @@ struct SlotRow {
     level: u32,
     experience: i64,
     skill_points: i64,
+    /// Empty from a game server that predates respecs.
+    respec_points: String,
     /// `Some` for a deleted character ("" if the time is unknown).
     deleted_at: Option<Stamp>,
     /// The character the page shows.
@@ -317,8 +321,21 @@ impl SlotRow {
             level: c.level,
             experience: c.experience,
             skill_points: c.skill_points,
+            respec_points: c.respec_points.map(|n| n.to_string()).unwrap_or_default(),
         }
     }
+}
+
+/// The character page's respec line: points, respecs taken and the next fee when known.
+fn respec_summary(points: Option<i64>, taken: Option<i64>, next_fee: Option<i64>) -> String {
+    let Some(points) = points else {
+        return String::new();
+    };
+    let mut line = format!("{points} points, {} taken", taken.unwrap_or(0));
+    if let Some(fee) = next_fee {
+        line.push_str(&format!(", next costs {fee}"));
+    }
+    line
 }
 
 #[derive(Deserialize)]
@@ -397,7 +414,9 @@ async fn character_page(
                 .into_iter()
                 .map(|x| SlotRow::new(x, c.character_id))
                 .collect();
+            let respec = respec_summary(c.respec_points, c.respec_count, c.next_respec_fee);
             view.character = Some(CharacterView {
+                respec,
                 slot: c.slot,
                 name: c.name.unwrap_or_default(),
                 faction: c.faction.map_or("", faction_name),
@@ -981,6 +1000,7 @@ mod tests {
             experience: 9000,
             skill_points: 40,
             next_level: "9500".into(),
+            respec: "3000 points, 1 taken, next costs 5000".into(),
             session: "offline",
         }
     }
@@ -996,6 +1016,7 @@ mod tests {
             skill_points: 2,
             deleted,
             deleted_at: deleted.then(|| "2026-11-20T08:30:00Z".into()),
+            respec_points: Some(3000 + i64::from(slot)),
         }
     }
 
@@ -1024,6 +1045,9 @@ mod tests {
         assert!(!html.contains("?slot=1"));
         assert!(html.contains("<h2>Slot 2 · AlphaTwo</h2>"));
         assert!(html.contains("<dt>Faction</dt><dd>SVER</dd>"));
+        // Each slot's respec points, and the shown character's respec line.
+        assert!(html.contains("<th>Respec points</th>") && html.contains("<td>3002</td>"));
+        assert!(html.contains("<dt>Respec</dt><dd>3000 points, 1 taken, next costs 5000</dd>"));
         // The level form names the slot it changes.
         assert!(html.contains("in slot 2 (AlphaTwo)"));
         assert!(html.contains("<input type=\"hidden\" name=\"slot\" value=\"2\">"));

@@ -173,6 +173,13 @@ Test("character slots: three per account, soft deletion with the name moved asid
 Test("character slots through MAPS and MAS: three allowed, slot positions, delete requests and login", LeadershipProgressionChecks.CharacterSlotSessions);
 Test("character delete keeps the MAS session: keepalives answered, re-create and login on the same channel", LeadershipProgressionChecks.CharacterDeleteKeepsMasSession);
 Test("character slots through mag-admin and the admin API: per-character targets, restore and purge", LeadershipProgressionChecks.CharacterSlotAdmin);
+Test("skill respec wire: bare 0254 request, 0255 failure bit or record", LeadershipProgressionChecks.RespecWire);
+Test("respec point floor setting parses whole points and fails fast", LeadershipProgressionChecks.RespecFloorSetting);
+Test("respec point floor applies on load to every slot, keeps higher balances and is inert unset", LeadershipProgressionChecks.RespecFloorOnLoad);
+Test("skill respec refunds, rebuilds kits, spends the fee and the floor tops it up", LeadershipProgressionChecks.RespecSpendAndTopUp);
+Test("skill respec refusals change nothing and answer a bare failure", LeadershipProgressionChecks.RespecRefusals);
+Test("respec points per slot in mag-admin and the admin API", LeadershipProgressionChecks.RespecAdminView);
+Test("postgres skill respec stores the count and balance and floors on read", LeadershipProgressionChecks.PostgresRespec);
 Test("account-bound NP identity creation and persistence", NpIdentityChecks.Run);
 Test("MLS answers lobby player-card character data for any character", LeadershipProgressionChecks.PlayerCardLookup);
 Test("retail player online and game-info wire", LeadershipProgressionChecks.PlayerStatusWire);

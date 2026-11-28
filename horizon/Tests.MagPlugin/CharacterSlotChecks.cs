@@ -497,7 +497,7 @@ internal static partial class LeadershipProgressionChecks
         catch (PostgresException) { refused = true; }
         Check(refused, "Schema 2 allows one character per account");
 
-        Check(database.Migrate() == 1 && database.SchemaVersion() == database.LatestSchemaVersion, "Migration 0003 applies");
+        Check(database.Migrate() == database.LatestSchemaVersion - 2 && database.SchemaVersion() == database.LatestSchemaVersion, "Migration 0003 and later apply");
         var pg = LocalCharacterStore.ForPostgres(database);
         pg.ProgressionCatalog = Load(directory, Catalog()); pg.Clock = () => SlotNow;
         var alpha = pg.ReadForAccount("alpha").Single();
