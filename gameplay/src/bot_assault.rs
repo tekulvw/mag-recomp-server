@@ -6,8 +6,8 @@
 //! that advance a stage only while every point of it is secured at once.
 //!
 //! - **Points.** Attacking bots of a squad whose objective is a
-//!   secure-and-hold point stand on a ring inside or at the edge of the point
-//!   (`hold_radius_m`), whatever its state, instead of the general attack
+//!   secure-and-hold point stand on a ring at the edge of the point, within
+//!   the defenders' contest radius (`hold_radius_m`), whatever its state, instead of the general attack
 //!   roles that kept most of a squad 18-34 m back. While the point is in its
 //!   completion window, the attackers' armed-objective guards use the same
 //!   ring. The operator still walks into a trigger and holds the action.
@@ -64,13 +64,13 @@ impl Default for Policy {
         Self {
             enabled: true,
             game_types: vec![2],
-            hold_radius_m: [2.5, 7.],
+            hold_radius_m: [4., 12.],
             stage_hold_squads: 1,
             breach_reserve_squads: 1,
             rally_back_m: 35.,
             rally_radius_m: 12.,
-            rally_share: 0.6,
-            rally_wait_ms: 20_000,
+            rally_share: 0.8,
+            rally_wait_ms: 30_000,
         }
     }
 }

@@ -42,8 +42,8 @@ The server's capture rules are retail's, read from the authored data:
 ## Points
 
 Attacking bots whose squad works on a secure-and-hold point stand on a ring
-around its trigger, `hold_radius_m` (default 2.5 to 7 m), inside the trigger
-box or at its edge. This holds in every state of the point. The operator
+around its trigger, `hold_radius_m` (default 4 to 12 m): at the edge of the
+trigger box and inside the defenders' 15 m `contest_radius_m`. This holds in every state of the point. The operator
 still walks into a trigger and holds the action. In the completion window
 the attackers' armed-objective guards use the same ring
 ([bot-armed-objectives.md](bot-armed-objectives.md)). With attackers inside
@@ -84,9 +84,9 @@ defence, and nobody contested the point meanwhile.
 A squad whose open point (state `Deactivated`) has none of its living bots
 within `rally_back_m` (default 35 m) gathers first. Its bots wait at a rally
 place `rally_back_m` before the point, towards the squad's current spawn,
-within `rally_radius_m / 2`. The push starts when `rally_share` (default 60%)
+within `rally_radius_m / 2`. The push starts when `rally_share` (default 80%)
 of its living bots are within `rally_radius_m` of the rally place or already
-inside `rally_back_m`, or `rally_wait_ms` (default 20 s) after the first of
+inside `rally_back_m`, or `rally_wait_ms` (default 30 s) after the first of
 them got there. A squad that
 already has a bot forward pushes at once. A push lasts at least
 `rally_wait_ms`, and then until the squad has no living bot within
@@ -100,9 +100,9 @@ rally: everybody goes in.
 The population file's `assault` object. Omitted fields use these defaults:
 
 ```json
-"assault": {"enabled": true, "game_types": [2], "hold_radius_m": [2.5, 7.0],
+"assault": {"enabled": true, "game_types": [2], "hold_radius_m": [4.0, 12.0],
   "stage_hold_squads": 1, "breach_reserve_squads": 1, "rally_back_m": 35.0,
-  "rally_radius_m": 12.0, "rally_share": 0.6, "rally_wait_ms": 20000}
+  "rally_radius_m": 12.0, "rally_share": 0.8, "rally_wait_ms": 30000}
 ```
 
 - `"enabled": false` restores the previous behaviour: attack roles, every
@@ -121,24 +121,32 @@ The population file's `assault` object. Omitted fields use these defaults:
 
 ## Measurements
 
-Headless 256-character sims on the live bundle, 2000 s each, Baku (Raven and
-Valor attacking) and Canal (S.V.E.R. attacking), two seeds each (one and
-three observers), before and after:
+Headless 256-character sims, 2000 s each, on 0.19.0 code (bot downs and
+medics included): Baku with Raven and with Valor attacking, and Canal with
+S.V.E.R. attacking, two seeds each (one and three observers). The arms of each
+map and seed ran side by side in one pod. "Off" is `"enabled": false`. "First
+release" is this policy's first defaults (ring 2.5 to 7 m, rally 60% or 20 s).
+"Defaults" are the values above.
 
-| | before | after |
-| --- | --- | --- |
-| platoons on the final stage by 600 s | 13 of 24 | 16 of 24 |
-| platoons on the final stage by 2000 s | 17 of 24 | 20 of 24 |
-| captures reversed in their completion window | 82% (516 of 630) | 65% (329 of 508) |
-| final points held by 1800 s (point-seconds) | 8807 | 14378 |
-| matches the attackers would win by 1800 s | 2 of 6 | 4 of 6 |
-| attackers on a point task within 10 m of it | 2-8% | 7-33% |
-| deaths, attackers / defenders | 9305 / 8152 | 11093 / 8523 |
+| | off | first release | defaults |
+| --- | --- | --- | --- |
+| platoons on the final stage by 600 s | 16 of 24 | 23 of 24 | 23 of 24 |
+| platoons on the final stage by 2000 s | 20 of 24 | 24 of 24 | 24 of 24 |
+| attacker wins by 1800 s | 3 of 6 (997, 1447, 1502 s) | 5 of 6 (673 to 1407 s) | 2 of 6 (1318, 1609 s) |
+| captures reversed in their completion window | 73% | 53% | 54% |
+| deaths, attackers / defenders | 5762 / 5701 | 5542 / 4767 | 5877 / 4899 |
 
-The headless sims never start the score clock (no human spawns), so the
-score at 1800 s is computed from the retail bleed and the time the final
-points were held. Variance between seeds is large: the same map can end with
-one or three platoons on the final stage.
+The headless sims never start the score clock (no human spawns), so a win is
+computed from the retail bleed and the time the final points were held. With
+the defaults, defenders were left with 784, 368, 16, 272 and 272 points in
+their four wins (one of them ended at 1825 s, just past the limit): matches
+are decided near the end. Without the policy, the attackers either won
+outright or one or two platoons never reached the final stage.
+
+Tick work (tick time without `sim.worker_wait`, the sim waiting for cover and
+spawn-route workers that run off the tick live), medians of six runs: mean
+18.5 ms off, 20.1 ms first release, 20.9 ms defaults; p99 52, 59 and 60 ms.
+The bots' objective planning grows by about 0.7 to 0.9 ms per tick.
 
 ## Not implemented
 

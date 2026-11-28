@@ -168,13 +168,22 @@ fn input(squad: u16, point: Option<u16>) -> WaveInput {
     }
 }
 
+/// The wave tests' numbers: push at 60% gathered, wait 20 s.
+fn wave_policy() -> Policy {
+    Policy {
+        rally_share: 0.6,
+        rally_wait_ms: 20_000,
+        ..Policy::default()
+    }
+}
+
 fn at(ms: u64) -> Duration {
     Duration::from_millis(ms)
 }
 
 #[test]
 fn a_squad_far_from_its_point_gathers_then_pushes_together() {
-    let policy = Policy::default();
+    let policy = wave_policy();
     let mut waves = BTreeMap::new();
     let far = vec![[120., 0., 0.]; 4];
     let bots = BTreeMap::from([(1, far)]);
@@ -244,7 +253,7 @@ fn a_squad_far_from_its_point_gathers_then_pushes_together() {
 
 #[test]
 fn a_rally_ends_its_wait_after_the_first_arrival_and_squads_forward_push_at_once() {
-    let policy = Policy::default();
+    let policy = wave_policy();
     let mut waves = BTreeMap::new();
     // Squad 1: one of three at the rally place. Squad 2: a bot forward.
     let bots = BTreeMap::from([
@@ -285,7 +294,7 @@ fn a_rally_ends_its_wait_after_the_first_arrival_and_squads_forward_push_at_once
 fn waves_end_when_the_point_is_no_longer_open_or_rallies_are_off() {
     let mut waves = BTreeMap::new();
     let bots = BTreeMap::from([(1, vec![[120., 0., 0.]])]);
-    let policy = Policy::default();
+    let policy = wave_policy();
     advance_waves(&mut waves, &[input(1, Some(7))], &bots, &policy, at(0));
     // The point is being taken or held: no wave, bots go in.
     assert_eq!(
@@ -301,7 +310,7 @@ fn waves_end_when_the_point_is_no_longer_open_or_rallies_are_off() {
     );
     let off = Policy {
         rally_back_m: 0.,
-        ..Policy::default()
+        ..wave_policy()
     };
     assert!(advance_waves(&mut waves, &[input(1, Some(7))], &bots, &off, at(400)).is_empty());
     assert!(waves.is_empty());
@@ -309,7 +318,7 @@ fn waves_end_when_the_point_is_no_longer_open_or_rallies_are_off() {
 
 #[test]
 fn a_squad_without_living_bots_keeps_its_wave() {
-    let policy = Policy::default();
+    let policy = wave_policy();
     let mut waves = BTreeMap::from([(
         1,
         Wave::Push {
@@ -331,9 +340,9 @@ fn a_squad_without_living_bots_keeps_its_wave() {
 #[test]
 fn the_documented_population_object_is_the_default_and_unknown_fields_are_refused() {
     let documented: Policy = serde_json::from_value(serde_json::json!({
-        "enabled": true, "game_types": [2], "hold_radius_m": [2.5, 7.0],
+        "enabled": true, "game_types": [2], "hold_radius_m": [4.0, 12.0],
         "stage_hold_squads": 1, "breach_reserve_squads": 1, "rally_back_m": 35.0, "rally_radius_m": 12.0,
-        "rally_share": 0.6, "rally_wait_ms": 20000
+        "rally_share": 0.8, "rally_wait_ms": 30000
     }))
     .unwrap();
     assert_eq!(documented, Policy::default());
