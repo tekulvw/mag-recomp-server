@@ -55,7 +55,7 @@ fn perforated_stack(floors: &[f32]) -> BakeInput {
     }
 }
 
-fn stack() -> NavMesh {
+pub(super) fn stack() -> NavMesh {
     static ARTIFACT: std::sync::OnceLock<Artifact> = std::sync::OnceLock::new();
     let artifact = ARTIFACT
         .get_or_init(|| bake(perforated_stack(&[-6.6, -4.4, -2.2, 0., 2.2, 4.4, 6.6])).unwrap());

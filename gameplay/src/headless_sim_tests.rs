@@ -140,6 +140,8 @@ fn options_default_to_one_observer_and_read_every_setting() {
             ("MAG_SIM_SNAPSHOTS", "1"),
             ("MAG_SIM_WARMUP_S", "120"),
             ("MAG_SIM_COMPLETE_STRUCTURALS", "24@60, 27@90"),
+            ("MAG_SIM_CLOCK", "wall"),
+            ("MAG_SIM_STALL", "900@30"),
         ]),
     )
     .unwrap();
@@ -154,6 +156,8 @@ fn options_default_to_one_observer_and_read_every_setting() {
             snapshots: true,
             warmup_seconds: 120,
             structural_completions: vec![(24, 60), (27, 90)],
+            wall_clock: true,
+            stall: Some((900, 30)),
         }
     );
 }
@@ -173,6 +177,8 @@ fn invalid_options_fail_instead_of_falling_back() {
         ("MAG_SIM_COMPLETE_STRUCTURALS", "24@0"),
         ("MAG_SIM_COMPLETE_STRUCTURALS", "24@61"),
         ("MAG_SIM_COMPLETE_STRUCTURALS", "x@10"),
+        ("MAG_SIM_CLOCK", "real"),
+        ("MAG_SIM_STALL", "900@30"),
     ] {
         let error = HeadlessSimOptions::from_lookup(60, lookup(&[(name, value)])).unwrap_err();
         assert!(error.contains(name), "{name}={value:?}: {error}");

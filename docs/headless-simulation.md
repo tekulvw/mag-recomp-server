@@ -35,6 +35,17 @@ How it works:
 - The world advances in 50 ms ticks as fast as the CPU allows (roughly 30
   simulated minutes in about 10 s on a laptop) and writes the normal evidence
   log given by `--log`.
+- `MAG_SIM_CLOCK=wall` (default `virtual`) advances virtual time the way the
+  live scheduler does instead: a tick whose work takes longer than 50 ms
+  delays the next tick by that much, rounded up to the 50 ms grid, so the
+  world sees the same late ticks it would live. The cover and spawn-route
+  workers then run beside the tick, as they do live, instead of being waited
+  for. A run then depends on the CPU it runs on.
+  Periodic events (snapshots, scripted structural completions) that fall
+  inside a skipped interval are skipped with it.
+- `MAG_SIM_STALL=900@30` (wall clock only) adds 900 ms to one tick every 30
+  simulated seconds, standing in for a slow tick, to measure whether the world
+  recovers from one or keeps running late.
 - Bot cover spot builds ([bot-cover.md](bot-cover.md)) run on a worker thread
   live; the simulation waits for them instead, so virtual time does not run
   ahead without cover.
@@ -99,11 +110,20 @@ before `MAG_SIM_WARMUP_S` (default `0`) are left out of it.
     after each tick;
   - `evicted_at_ms`, when it was evicted.
 - `total_sent_packets_per_s`, `total_sent_bytes_per_s` and `evictions`.
+- With `MAG_SIM_CLOCK=wall`: `tick_interval_ms`, the virtual time from one tick
+  to the next (50 ms when every tick keeps up); `event_wait_ms`, how long a
+  client event arriving at a random time waits for the tick to release the
+  engine, sampled every 10 ms of virtual time (a client's hit waits this long
+  before it is applied and its reply leaves); and `stalled_share`, the share of
+  virtual time spent in ticks that ran past their 50 ms slot, injected stalls
+  included.
 
 `MAG_SIM_TICKS=PATH` also writes one JSON line per tick, warmup included:
 `t_ms`, `tick_ns`, `phases_ns`, `bots`, `bots_alive`, `event_drains`,
 `event_drain_ns`, `sent_packets`, `sent_bytes`, and `observers` as
-`[player_id, sent_packets, sent_bytes, queue_depth]` per connected observer.
+`[player_id, sent_packets, sent_bytes, queue_depth]` per connected observer,
+`advance_ms` (virtual time to the next tick) and `injected_ms` (any
+`MAG_SIM_STALL` added to this tick).
 
 Useful evidence receipts: `bot_population_spawn` / `bot_respawn` (life starts,
 with the spawn point and arrival chosen as in [bot-active-spawns.md](bot-active-spawns.md)),
