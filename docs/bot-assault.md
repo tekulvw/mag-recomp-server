@@ -121,7 +121,24 @@ The population file's `assault` object. Omitted fields use these defaults:
 
 ## Measurements
 
-See the pull request for the A/B runs on Baku (Raven and Valor) and Canal.
+Headless 256-character sims on the live bundle, 2000 s each, Baku (Raven and
+Valor attacking) and Canal (S.V.E.R. attacking), two seeds each (one and
+three observers), before and after:
+
+| | before | after |
+| --- | --- | --- |
+| platoons on the final stage by 600 s | 13 of 24 | 16 of 24 |
+| platoons on the final stage by 2000 s | 17 of 24 | 20 of 24 |
+| captures reversed in their completion window | 82% (516 of 630) | 65% (329 of 508) |
+| final points held by 1800 s (point-seconds) | 8807 | 14378 |
+| matches the attackers would win by 1800 s | 2 of 6 | 4 of 6 |
+| attackers on a point task within 10 m of it | 2-8% | 7-33% |
+| deaths, attackers / defenders | 9305 / 8152 | 11093 / 8523 |
+
+The headless sims never start the score clock (no human spawns), so the
+score at 1800 s is computed from the retail bleed and the time the final
+points were held. Variance between seeds is large: the same map can end with
+one or three platoons on the final stage.
 
 ## Not implemented
 
