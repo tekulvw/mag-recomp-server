@@ -238,6 +238,8 @@ pub(super) struct WorldBot {
     pub(super) downed: Option<crate::bot_incapacitation::BotDowned>,
     /// Revivals in this life; a later collapse is a new kill.
     pub(super) revivals: u32,
+    /// The downed teammate this medic is walking to, if any.
+    pub(super) medic_approach: Option<crate::bot_medic_approach::Approach>,
     /// The spawn point this life started at, when it used one.
     pub(super) life_spawn: Option<u16>,
     pub(super) move_attempted: bool,
@@ -1904,6 +1906,7 @@ impl<W: Write> Engine<W> {
                 bot.received_healing = None;
                 bot.downed = None;
                 bot.revivals = 0;
+                bot.medic_approach = None;
                 bot.life_spawn = spawn.spawn_point;
                 bot.damage = initial_damage();
                 bot.move_attempted = false;
@@ -3824,6 +3827,7 @@ impl<W: Write> Engine<W> {
                     received_healing: None,
                     downed: None,
                     revivals: 0,
+                    medic_approach: None,
                     life_spawn: spawn.spawn_point,
                     move_attempted: false,
                     due_respawn_wave: None,
@@ -4399,6 +4403,10 @@ impl BotRegistry {
     /// The bots a recipient holds snapshots of, if it has been snapshotted.
     pub(crate) fn known_bots(&self, reservation_id: &str) -> Option<&BTreeSet<u16>> {
         self.known.get(reservation_id)
+    }
+    /// The population's fill total, for a test that adds a human.
+    pub(crate) fn set_total_for_test(&mut self, total: usize) {
+        self.total = total;
     }
     /// The bots a recipient holds snapshots of, for a test to set.
     pub(crate) fn known_for_test(&mut self, reservation_id: &str) -> &mut BTreeSet<u16> {

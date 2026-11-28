@@ -730,6 +730,7 @@ fn unclaimed(bot: &WorldBot) -> bool {
         && !bot.drop_retreat
         && !bot.drop_reroute
         && bot.traffic_yield.is_none()
+        && bot.medic_approach.is_none()
 }
 
 struct Budget {
