@@ -124,6 +124,9 @@ impl<W: Write> Engine<W> {
             bot.descent = None;
             return Ok(());
         }
+        // Time in the air is not a traffic stall: the stall clock starts at
+        // touchdown.
+        bot.traffic_progress = None;
         let landed = descent.landed(now);
         if !landed && now < descent.published + PUBLISH_INTERVAL {
             return Ok(());
