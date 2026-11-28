@@ -309,6 +309,7 @@ impl<W: Write> Engine<W> {
             seat_transitions: Vec::new(),
             terminal_seat: None,
             last_exit: None,
+            ground_exit: None,
             match_clock_started: None,
             last_clock_points: self.match_profile().maximum_points[0],
             round_scores: None,

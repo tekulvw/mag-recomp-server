@@ -493,6 +493,8 @@ pub enum GameMessage<'a> {
     CorrectionAck(crate::correction_ack::CorrectionAck),
     /// `0x0259`: the client's talk-channel selection, one byte.
     TalkChannel(crate::voice_routing::TalkChannel),
+    /// `0x020d`: a driver's vehicle report (stuck, or a character collision).
+    VehicleReport(crate::vehicle_collision::VehicleReport),
     Unknown {
         message_type: u16,
         body: &'a [u8],
@@ -668,6 +670,20 @@ impl<'a> GameMessage<'a> {
             0x03ea => Ok(Self::ObjectiveInteraction(ObjectiveInteraction::decode(
                 bytes,
             )?)),
+            0x020d => {
+                let kind = crate::vehicle_collision::ReportKind::from_wire(r.take(1)?[0])
+                    .ok_or("invalid_vehicle_report_kind")?;
+                let attacker = r.u32()?;
+                let defender = r.u32()?;
+                r.finish()?;
+                Ok(Self::VehicleReport(
+                    crate::vehicle_collision::VehicleReport {
+                        kind,
+                        attacker,
+                        defender,
+                    },
+                ))
+            }
             0x021d => {
                 let request = Repair {
                     target_object_id: r.u32()?,
@@ -951,6 +967,52 @@ mod resuscitate_dispatch_tests {
         let mut trailing = packet.to_vec();
         trailing.push(0);
         assert!(GameMessage::decode_with_profile(&trailing, profile).is_err());
+    }
+}
+
+#[cfg(test)]
+mod vehicle_report_wire_tests {
+    use super::*;
+    use crate::vehicle_collision::{ReportKind, VehicleReport};
+
+    #[test]
+    fn vehicle_report_is_a_kind_byte_and_two_object_ids() {
+        let profile = crate::wire_profile::WireProfileCatalog::embedded()
+            .profile(20231)
+            .unwrap();
+        for (kind, expected) in [
+            (0, ReportKind::Stuck),
+            (1, ReportKind::CharacterCollision),
+            (2, ReportKind::Catastrophic),
+        ] {
+            let packet = [
+                0x02, 0x0d, kind, 0x01, 0x00, 0x00, 0x03, 0x03, 0x80, 0x00, 0x12,
+            ];
+            let Ok(GameMessage::VehicleReport(report)) =
+                GameMessage::decode_with_profile(&packet, profile)
+            else {
+                panic!("0x020d must enter typed dispatch");
+            };
+            assert_eq!(
+                report,
+                VehicleReport {
+                    kind: expected,
+                    attacker: 0x0100_0003,
+                    defender: 0x0380_0012,
+                }
+            );
+            for length in 2..packet.len() {
+                assert!(GameMessage::decode_with_profile(&packet[..length], profile).is_err());
+            }
+            let mut trailing = packet.to_vec();
+            trailing.push(0);
+            assert!(GameMessage::decode_with_profile(&trailing, profile).is_err());
+        }
+        let bad_kind = [0x02, 0x0d, 3, 1, 0, 0, 3, 3, 0x80, 0, 0x12];
+        assert_eq!(
+            GameMessage::decode_with_profile(&bad_kind, profile).err(),
+            Some("invalid_vehicle_report_kind")
+        );
     }
 }
 

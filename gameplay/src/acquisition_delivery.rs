@@ -484,6 +484,9 @@ impl<W: Write> Engine<W> {
                 actor.latest_owner_sequence,
                 exit.position.y,
             )?;
+            if let Some(left) = actor.ground_seat {
+                actor.ground_exit = Some((left.vehicle_index, now));
+            }
             actor.ground_seat = None;
             actor.flash_yaw = None;
             actor.helo_seat = None;

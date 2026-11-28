@@ -158,6 +158,9 @@ pub(crate) struct PositionCorrection {
 #[derive(Clone, Default)]
 pub struct PlayerTracking {
     pub sample: Option<PositionSample>,
+    /// The client-reported sample `sample` replaced, while both are client
+    /// reports. Any server placement clears it, so a teleport is never motion.
+    pub(crate) previous_client_sample: Option<PositionSample>,
     pub accepted_position_sequence: u32,
     pub(crate) pending_correction: Option<PositionCorrection>,
 }
@@ -168,6 +171,7 @@ impl PlayerTracking {
         origin: PositionOrigin,
         received_at_ms: u64,
     ) {
+        self.previous_client_sample = None;
         self.pending_correction = if matches!(origin, PositionOrigin::ServerCorrection) {
             Some(PositionCorrection {
                 expected_position: position,
@@ -253,6 +257,7 @@ impl PlayerTracking {
             && sequence > self.accepted_position_sequence
         {
             self.accepted_position_sequence = sequence;
+            self.previous_client_sample = None;
             self.sample = Some(sample);
         } else {
             // Native wraps zero-1. This server's sequence space is monotonic
@@ -281,11 +286,33 @@ impl PlayerTracking {
             return;
         }
         self.accepted_position_sequence = sequence;
+        self.previous_client_sample = self
+            .sample
+            .filter(|sample| matches!(sample.origin, PositionOrigin::ClientReported));
         self.sample = Some(PositionSample {
             position,
             origin: PositionOrigin::ClientReported,
             received_at_ms,
             client_sequence: Some(sequence),
         });
+    }
+    /// The two latest client-reported positions, oldest first.
+    pub(crate) fn client_motion(
+        &self,
+    ) -> (
+        Option<crate::vehicle_collision::MotionSample>,
+        Option<crate::vehicle_collision::MotionSample>,
+    ) {
+        let motion = |sample: PositionSample| crate::vehicle_collision::MotionSample {
+            position: sample.position,
+            at_ms: sample.received_at_ms,
+        };
+        let latest = self
+            .sample
+            .filter(|sample| matches!(sample.origin, PositionOrigin::ClientReported));
+        (
+            latest.and(self.previous_client_sample).map(motion),
+            latest.map(motion),
+        )
     }
 }

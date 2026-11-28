@@ -90,6 +90,8 @@ Optional [selected-match character damage rules](docs/character-damage-rules.md)
 load the friendly-fire base from external configuration before owned modifiers and armor.
 Optional [ready-human startup quorum](docs/startup-quorum.md) keeps a configured
 match waiting for enough humans on each side.
+Optional [ground-vehicle impact damage](docs/vehicle-impact-damage.md) applies the
+driver's reported collisions to the characters a vehicle hits.
 Optional [human incapacitation and resuscitation](docs/incapacitation.md) distinguishes
 a downed actor from a respawnable terminal death and preserves the existing kit.
 [Committed kit preferences](docs/loadout-selection.md) remember a valid in-match
