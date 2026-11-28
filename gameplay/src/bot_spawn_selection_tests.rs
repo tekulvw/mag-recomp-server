@@ -1224,12 +1224,14 @@ fn a_structure_gate_change_keeps_the_drop_zone_and_revalidates_it_at_most_every_
         .unwrap();
     assert!(engine.bot_spawn_routes.pending.contains(&key));
     assert_eq!(engine.bot_registry.spawn_candidates.probes, probed);
-    let (choice, receipts) = choose(&mut engine, &actors);
+    // The revalidation may or may not have answered yet; either way the
+    // life uses the drop zone.
+    let (choice, mut receipts) = choose(&mut engine, &actors);
     assert_eq!(spawned(choice).spawn_point, Some(DROP));
-    assert!(receipts.is_empty(), "the earlier qualification is in use");
     engine.wait_bot_spawn_routes(1).unwrap();
-    let (choice, receipts) = choose(&mut engine, &actors);
+    let (choice, later) = choose(&mut engine, &actors);
     assert_eq!(spawned(choice).spawn_point, Some(DROP));
+    receipts.extend(later);
     assert!(
         receipts
             .iter()
