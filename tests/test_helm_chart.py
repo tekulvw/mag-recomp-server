@@ -112,6 +112,34 @@ class ChartTests(unittest.TestCase):
         for flag in ('--log-segment-bytes', '--log-retention-s'):
             render({'data': {'gameplayExtraArgs': [flag, '60']}}, ok=False)
 
+    def test_optional_portal_account_owner_lookup(self):
+        ticket = {'mode': 'required', 'audience': 'play.example.test', 'keys': {'1': 'QUJD'},
+                  'accountLookup': {'mode': 'required', 'existingSecret': 'portal-account-db', 'secretKey': 'connectionString'}}
+        docs = render({'portalTickets': ticket})
+        deployment = next(d for d in docs if d['kind'] == 'Deployment' and any(c['name'] == 'medius' for c in d['spec']['template']['spec']['containers']))
+        pod = deployment['spec']['template']['spec']
+        for container in pod['containers']:
+            env = {e['name']: e.get('value') for e in container.get('env', [])}
+            mounts = {m['name']: m for m in container.get('volumeMounts', [])}
+            if container['name'] in ('medius', 'maps'):
+                self.assertEqual(env['MAG_PORTAL_ACCOUNT_LOOKUP'], 'required')
+                self.assertEqual(env['MAG_PORTAL_ACCOUNT_DB_CONNECTION_FILE'], '/portal-account-db/connection-string')
+                self.assertTrue(mounts['portal-account-db']['readOnly'])
+            else:
+                self.assertNotIn('MAG_PORTAL_ACCOUNT_LOOKUP', env)
+                self.assertNotIn('portal-account-db', mounts)
+        volume = next(v for v in pod['volumes'] if v['name'] == 'portal-account-db')
+        self.assertEqual(volume['secret']['secretName'], 'portal-account-db')
+        self.assertEqual(volume['secret']['items'], [{'key': 'connectionString', 'path': 'connection-string'}])
+        for bad in ({'mode': 'required'}, {'mode': 'required', 'existingSecret': 'portal-account-db', 'secretKey': ''}):
+            broken = dict(ticket, accountLookup=bad)
+            self.assertIn('accountLookup', render({'portalTickets': broken}, ok=False))
+        for d in render():
+            if d['kind'] == 'Deployment':
+                for c in d['spec']['template']['spec']['containers']:
+                    self.assertFalse(any(e['name'] == 'MAG_PORTAL_ACCOUNT_LOOKUP' for e in c.get('env', [])))
+                    self.assertFalse(any(m['name'] == 'portal-account-db' for m in c.get('volumeMounts', [])))
+
     def test_optional_portal_tickets(self):
         def medius_env(docs):
             return [{e['name']: e.get('value') for e in c.get('env', [])}

@@ -124,6 +124,7 @@ pub fn router(state: Arc<AppState>) -> Router {
         .route("/auth/google/callback", get(sign_in_callback))
         .route("/logout", post(sign_out))
         .route("/account", get(account_page))
+        .route("/account/name", get(rename_page).post(rename_submit))
         .route("/account/delete", post(delete_account))
         .route("/claim", get(claim_page).post(claim_submit))
         .route("/link", get(link_page).post(link_lookup))
@@ -336,6 +337,18 @@ struct AccountPage {
     banned: bool,
     devices: Vec<DeviceRow>,
     staff_role: Option<&'static str>,
+    name_changes: bool,
+}
+
+#[derive(Template)]
+#[template(path = "rename.html")]
+struct RenamePage {
+    nav_csrf: Option<String>,
+    csrf: String,
+    current: String,
+    value: String,
+    error: Option<&'static str>,
+    next_change: Option<Stamp>,
 }
 
 #[derive(Template)]
@@ -920,8 +933,105 @@ async fn account_page(State(state): Shared, headers: HeaderMap) -> PageResult {
             ban_reason: a.ban_reason,
             devices,
             staff_role,
+            name_changes: state.settings.player_name_changes,
         },
     ))
+}
+
+fn rename_view(
+    session: &Session,
+    value: String,
+    error: Option<&'static str>,
+    status: StatusCode,
+) -> Response {
+    page(
+        status,
+        RenamePage {
+            nav_csrf: Some(session.csrf_token.clone()),
+            csrf: session.csrf_token.clone(),
+            current: session.account.player_name.clone().unwrap_or_default(),
+            value,
+            error,
+            next_change: session
+                .account
+                .name_changed_at
+                .map(|t| stamp(t + time::Duration::hours(24))),
+        },
+    )
+}
+
+async fn rename_page(State(state): Shared, headers: HeaderMap) -> PageResult {
+    if !state.settings.player_name_changes {
+        return Ok(StatusCode::NOT_FOUND.into_response());
+    }
+    let session = match require_session(&state, &headers, "/account/name").await {
+        Ok(s) => s,
+        Err(r) => return Ok(*r),
+    };
+    if session.account.is_banned() {
+        return Ok(StatusCode::FORBIDDEN.into_response());
+    }
+    let Some(name) = session.account.player_name.clone() else {
+        return Ok(Redirect::to("/claim").into_response());
+    };
+    Ok(rename_view(&session, name, None, StatusCode::OK))
+}
+
+#[derive(Deserialize)]
+struct RenameForm {
+    csrf: String,
+    current: String,
+    name: String,
+}
+
+async fn rename_submit(
+    State(state): Shared,
+    headers: HeaderMap,
+    Form(form): Form<RenameForm>,
+) -> PageResult {
+    use db::RenameOutcome;
+    if !state.settings.player_name_changes {
+        return Ok(StatusCode::NOT_FOUND.into_response());
+    }
+    let mut session = match require_session(&state, &headers, "/account/name").await {
+        Ok(s) => s,
+        Err(r) => return Ok(*r),
+    };
+    if !csrf_ok(&session, &form.csrf) {
+        return Ok(csrf_failed());
+    }
+    if session.account.is_banned() {
+        return Ok(StatusCode::FORBIDDEN.into_response());
+    }
+    let value = form.name.trim().to_owned();
+    let outcome = db::rename_name(&state.pool, session.account.id, &form.current, &value).await?;
+    let (status, error) = match outcome {
+        RenameOutcome::Changed | RenameOutcome::Unchanged => {
+            return Ok(Redirect::to("/account").into_response());
+        }
+        RenameOutcome::Invalid => (
+            StatusCode::BAD_REQUEST,
+            "Use 3 to 15 letters, digits, - or _, starting with a letter.",
+        ),
+        RenameOutcome::Taken => (StatusCode::CONFLICT, "Someone already has that name."),
+        RenameOutcome::Reserved => (
+            StatusCode::CONFLICT,
+            "That name is reserved for another owner.",
+        ),
+        RenameOutcome::Cooldown(_) => (
+            StatusCode::CONFLICT,
+            "Wait 24 hours after your last name change before changing it again.",
+        ),
+        RenameOutcome::Stale => (
+            StatusCode::CONFLICT,
+            "Your name changed while this form was open. Check the current name and try again.",
+        ),
+        RenameOutcome::Unavailable => return Ok(StatusCode::FORBIDDEN.into_response()),
+    };
+    if let Some(current) = db::account(&state.pool, session.account.id).await? {
+        session.account = current;
+    }
+    Ok(rename_view(&session, value, Some(error), status))
 }
 
 #[derive(Deserialize)]

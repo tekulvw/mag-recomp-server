@@ -35,6 +35,8 @@ pub struct Settings {
     pub game_admin: Option<GameAdmin>,
     /// Player reports one account may file in 24 hours (`PORTAL_PLAYER_REPORTS_PER_DAY`).
     pub player_reports_per_day: i64,
+    /// Enable only after every ticket audience resolves numeric IDs to immutable owners.
+    pub player_name_changes: bool,
 }
 
 impl Settings {
@@ -57,6 +59,7 @@ impl Settings {
             owner_emails: Vec::new(),
             game_admin: None,
             player_reports_per_day: crate::player_reports::DEFAULT_PER_DAY,
+            player_name_changes: false,
         })
     }
 }

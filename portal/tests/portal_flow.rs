@@ -142,6 +142,17 @@ async fn harness_status(
     limits: web::Limits,
     status: Arc<StatusService>,
 ) -> Harness {
+    harness_status_names(pool, game_admin, reports, limits, status, false).await
+}
+
+async fn harness_status_names(
+    pool: PgPool,
+    game_admin: Option<GameAdmin>,
+    reports: Option<Arc<Reports>>,
+    limits: web::Limits,
+    status: Arc<StatusService>,
+    name_changes: bool,
+) -> Harness {
     let rsa_key = rsa::PrivateKey::new(&mut rand::rng(), 2048).unwrap();
     let der = rsa_key.to_pkcs1_der().unwrap();
     let jwks = json!({ "keys": [{
@@ -163,6 +174,7 @@ async fn harness_status(
     let provider_url = format!("http://{provider_addr}");
 
     let mut settings = Settings::new("http://localhost").unwrap();
+    settings.player_name_changes = name_changes;
     // Long enough that a loaded machine cannot stretch two back-to-back polls past it.
     settings.link_poll_seconds = 60;
     settings.owner_emails = vec!["owner@example.test".into()];
@@ -213,6 +225,121 @@ async fn harness_status(
         provider,
         pool,
     }
+}
+
+#[sqlx::test]
+async fn rename_requires_enabled_feature_session_and_csrf(
+    _: PgPoolOptions,
+    connect: PgConnectOptions,
+) {
+    let (pool, test_db) = support::pool(connect).await;
+    let disabled = harness(pool.clone()).await;
+    let session = disabled.sign_in("rename-person").await;
+    let csrf = disabled.csrf(&session).await;
+    disabled
+        .post_form("/claim", &session, &[("csrf", &csrf), ("name", "Alpha")])
+        .await;
+    assert_eq!(
+        disabled
+            .post_form(
+                "/account/name",
+                &session,
+                &[("csrf", &csrf), ("current", "Alpha"), ("name", "NewAlpha")]
+            )
+            .await
+            .status(),
+        StatusCode::NOT_FOUND
+    );
+    let enabled = harness_status_names(
+        pool.clone(),
+        None,
+        None,
+        web::Limits::default(),
+        Arc::new(StatusService::new(Vec::new(), StdDuration::from_secs(15))),
+        true,
+    )
+    .await;
+    assert_eq!(
+        enabled
+            .post_form(
+                "/account/name",
+                "invalid-session",
+                &[("csrf", &csrf), ("current", "Alpha"), ("name", "NewAlpha")]
+            )
+            .await
+            .status(),
+        StatusCode::SEE_OTHER
+    );
+    assert_eq!(
+        enabled
+            .post_form(
+                "/account/name",
+                &session,
+                &[
+                    ("csrf", "wrong"),
+                    ("current", "Alpha"),
+                    ("name", "NewAlpha")
+                ]
+            )
+            .await
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    let r = enabled
+        .post_form(
+            "/account/name",
+            &session,
+            &[("csrf", &csrf), ("current", "Alpha"), ("name", "NewAlpha")],
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::SEE_OTHER);
+    let account = db::session(&pool, &session).await.unwrap().unwrap().account;
+    assert_eq!(account.player_name.as_deref(), Some("NewAlpha"));
+    assert_eq!(account.game_account_name.as_deref(), Some("alpha"));
+    let token = "mgd_rename_ticket_fixture";
+    sqlx::query("INSERT INTO devices(account_id,token_hash,label) VALUES($1,$2,'rename fixture')")
+        .bind(account.id)
+        .bind(mag_portal::tokens::sha256(token.as_bytes()).as_slice())
+        .execute(&pool)
+        .await
+        .unwrap();
+    let (status, ticket) = enabled.ticket(token).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(ticket["account_id"], account.id);
+    assert_eq!(ticket["player_name"], "NewAlpha");
+    let bytes = STANDARD.decode(ticket["ticket"].as_str().unwrap()).unwrap();
+    assert_eq!(&bytes[..5], b"MAGT\x01", "native ticket format stays v1");
+    let audience_len = usize::from(bytes[42]);
+    let name_start = 44 + audience_len;
+    assert_eq!(&bytes[name_start..bytes.len() - 64], b"NewAlpha");
+    let r = enabled
+        .post_form(
+            "/account/name",
+            &session,
+            &[
+                ("csrf", &csrf),
+                ("current", "NewAlpha"),
+                ("name", "NEWALPHA"),
+            ],
+        )
+        .await;
+    assert_eq!(r.status(), StatusCode::CONFLICT);
+    assert!(r.text().await.unwrap().contains("24 hours"));
+    db::set_ban(&pool, "NewAlpha", Some("synthetic ban"))
+        .await
+        .unwrap();
+    assert_eq!(
+        enabled
+            .post_form(
+                "/account/name",
+                &session,
+                &[("csrf", &csrf), ("current", "NewAlpha"), ("name", "Other")]
+            )
+            .await
+            .status(),
+        StatusCode::FORBIDDEN
+    );
+    test_db.close().await;
 }
 
 fn set_cookies(r: &reqwest::Response) -> HashMap<String, String> {

@@ -8,6 +8,14 @@
 {{- $files := $pod.files }}
 {{- $worker := $pod.worker }}
 {{- $medius := eq $component "medius" }}
+{{- $portal := $root.Values.portalTickets | default dict }}
+{{- $ownerLookup := $portal.accountLookup | default dict }}
+{{- $ownersRequired := eq ($ownerLookup.mode | default "off") "required" }}
+{{- if and $medius $ownersRequired }}
+{{- if or (ne ($portal.mode | default "off") "required") (not $ownerLookup.existingSecret) (not $ownerLookup.secretKey) }}
+{{- fail "portalTickets.accountLookup=required needs portalTickets.mode=required, accountLookup.existingSecret and accountLookup.secretKey" }}
+{{- end }}
+{{- end }}
 {{- $registry := and $medius (not (empty $root.Values.gameplayWorkers)) }}
 {{- $shutdown := $root.Values.gameplayShutdown | default dict }}
 {{- $graceful := and (not $medius) (or (not (kindIs "invalid" $shutdown.drainSeconds)) (not (kindIs "invalid" $shutdown.receiptFlushSeconds))) }}
@@ -209,7 +217,6 @@ spec:
             - {name: MAG_REWARD_LEDGER_RETENTION_DAYS, value: {{ . | int | toString | quote }}}
             {{- end }}
             {{- end }}
-            {{- $portal := $root.Values.portalTickets | default dict }}
             {{- if eq ($portal.mode | default "off") "required" }}
             {{- $keys := list }}
             {{- range $id, $spki := $portal.keys }}
@@ -221,6 +228,10 @@ spec:
             - {name: MAG_PORTAL_TICKETS, value: required}
             - {name: MAG_PORTAL_TICKET_AUDIENCE, value: {{ $portal.audience | quote }}}
             - {name: MAG_PORTAL_TICKET_KEYS, value: {{ join "," $keys | quote }}}
+            {{- if $ownersRequired }}
+            - {name: MAG_PORTAL_ACCOUNT_LOOKUP, value: required}
+            - {name: MAG_PORTAL_ACCOUNT_DB_CONNECTION_FILE, value: /portal-account-db/connection-string}
+            {{- end }}
             {{- end }}
             {{- if and $main $root.Values.adminApi.enabled }}
             - {name: MAG_ADMIN_API_LISTEN, value: {{ printf "0.0.0.0:%d" (int $root.Values.adminApi.port) | quote }}}
@@ -261,6 +272,9 @@ spec:
             - {name: runtime-secrets, mountPath: /runtime-secrets, readOnly: true}
             - {name: logs, mountPath: /logs}
             - {name: tmp, mountPath: /tmp}
+            {{- if $ownersRequired }}
+            - {name: portal-account-db, mountPath: /portal-account-db, readOnly: true}
+            {{- end }}
             {{- if and $main $root.Values.adminApi.enabled }}
             - {name: admin-api-secret, mountPath: /admin-api, readOnly: true}
             {{- end }}
@@ -347,6 +361,14 @@ spec:
           emptyDir: {sizeLimit: {{ .emptyDirSizeLimit }}}
         {{- end }}
         {{- if $medius }}
+        {{- if $ownersRequired }}
+        - name: portal-account-db
+          secret:
+            secretName: {{ $ownerLookup.existingSecret | quote }}
+            items:
+              - {key: {{ $ownerLookup.secretKey | quote }}, path: connection-string}
+            defaultMode: 0440
+        {{- end }}
         - name: news
           emptyDir: {sizeLimit: 2Mi}
         - name: accounts

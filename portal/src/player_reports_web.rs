@@ -108,7 +108,7 @@ async fn reporter(
 fn own_key(session: &Session) -> Option<String> {
     session
         .account
-        .player_name
+        .game_account_name
         .as_deref()
         .map(crate::names::name_key)
 }

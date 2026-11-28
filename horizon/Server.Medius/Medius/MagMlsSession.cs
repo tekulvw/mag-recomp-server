@@ -15,6 +15,7 @@ namespace Server.Medius
         public int ApplicationId { get; private set; }
         public uint AccountId { get; private set; }
         public string AuthenticatedAccount { get; private set; }
+        public string AuthenticatedPublicName { get; private set; }
         public uint CharacterId { get; private set; }
         public LocalCharacterStore CharacterStore { get; set; }
         public string StorageStatus { get; private set; } = "inactive";
@@ -29,7 +30,7 @@ namespace Server.Medius
         {
             if (IsBound || registry == null || !registry.TryBind(connect.AccessToken, connect.SessionKey, connect.AppId,
                 connect.TargetWorldId, channelId, now, out var ticket)) return false;
-            ApplicationId = ticket.ApplicationId; AccountId = ticket.AccountId; AuthenticatedAccount = ticket.AuthenticatedAccount;
+            ApplicationId = ticket.ApplicationId; AccountId = ticket.AccountId; AuthenticatedAccount = ticket.AuthenticatedAccount; AuthenticatedPublicName = ticket.AuthenticatedPublicName;
             CharacterId = ticket.CharacterId; SessionKey = ticket.SessionKey;
             _registry = registry; _channelId = channelId; State = SessionState.Bound; _lastActivity = now; return true;
         }
@@ -111,7 +112,7 @@ namespace Server.Medius
                         var character = CharacterStore.ReadForAccount(AuthenticatedAccount).SingleOrDefault(row => row.Id == CharacterId);
                         if (character != null)
                         {
-                            response.Record = character.ToRecord();
+                            response.Record = MagPublicIdentity.DisplayRecord(character, _registry?.PublicNameForOwner(character.Account, now));
                             response.Success = outcome.Result == MagNetResult.Success;
                         }
                     }
@@ -178,10 +179,11 @@ namespace Server.Medius
                 try
                 {
                     var character = CharacterStore == null ? null :
-                        FindCharacter(CharacterStore.ReadAll(), lookup, id => id == CharacterId || _registry?.IsAccountOnline(id, now) == true);
+                        FindCharacter(CharacterStore.ReadAll(), lookup, id => id == CharacterId || _registry?.IsAccountOnline(id, now) == true,
+                            owner => _registry?.PublicNameForOwner(owner, now));
                     if (character != null)
                     {
-                        response.Record = character.ToRecord(); response.Success = true;
+                        response.Record = MagPublicIdentity.DisplayRecord(character, _registry?.PublicNameForOwner(character.Account, now)); response.Success = true;
                         StorageStatus = "character-data-served";
                     }
                     else StorageStatus = CharacterStore == null ? "character-data-store-unavailable" : "character-data-not-found";
@@ -286,10 +288,17 @@ namespace Server.Medius
         /// <summary>A player card's character: by id, by stored name, else by the name other players see. Every
         /// character of an account shows the same online ID, so a display name that only one account holds
         /// names the character it is playing (<paramref name="online"/>), else its lowest slot.</summary>
-        public static StoredCharacter FindCharacter(IReadOnlyList<StoredCharacter> characters, MagCharacterDataRequest lookup, Func<uint, bool> online)
+        public static StoredCharacter FindCharacter(IReadOnlyList<StoredCharacter> characters, MagCharacterDataRequest lookup, Func<uint, bool> online, Func<string, string> publicName = null)
         {
             if (lookup.QueryKind == 2) return lookup.AccountId == 0 ? null : characters.FirstOrDefault(row => row.Id == lookup.AccountId);
             if (lookup.QueryKind != 1 || string.IsNullOrEmpty(lookup.AccountName)) return null;
+            // A live authenticated public identity takes precedence over an unrelated historical
+            // character-name string. Ambiguous public identities never select either owner.
+            var authenticated = publicName == null ? Array.Empty<StoredCharacter>() :
+                characters.Where(row => publicName(row.Account) == lookup.AccountName).ToArray();
+            if (authenticated.Length != 0)
+                return authenticated.Select(row => row.Account).Distinct().Count() == 1
+                    ? authenticated.FirstOrDefault(row => online(row.Id)) ?? authenticated.OrderBy(row => row.Slot).First() : null;
             var stored = characters.FirstOrDefault(row => row.Name == lookup.AccountName);
             if (stored != null) return stored;
             var shown = characters.Where(row => row.DisplayName() == lookup.AccountName).ToArray();

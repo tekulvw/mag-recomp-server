@@ -48,6 +48,7 @@ namespace Server.Medius
         public static MagLoginRegistry MagLoginTickets = new MagLoginRegistry();
         /// <summary>Portal ticket sign-in (MAG_PORTAL_TICKETS=required); null keeps the development identity policy.</summary>
         public static MagPortalTicketPolicy PortalTickets { get; private set; }
+        private static MagPortalAccountCache PortalAccountCache;
         public static LocalDmeHost LocalDme;
         public static MagWorldRegistry WorldRegistry;
         /// <summary>DME humans across every world (MAG_DME_UDP_PORT_END, MAG_DME_HUMAN_CAPACITY).</summary>
@@ -417,7 +418,16 @@ namespace Server.Medius
                     Logger.Info("MAG_REWARD_LEDGER_OPEN_MATCH_TTL_HOURS applies only to the JSON character store; ignored.");
                 StartLedgerRetention();
             }
-            PortalTickets = MagPortalTicketPolicy.FromSettings(MagPortalTicketSettings.FromEnvironment());
+            var portalSettings = MagPortalTicketSettings.FromEnvironment();
+            var portalLookup = MagPortalAccountLookupSettings.Load(Environment.GetEnvironmentVariable, portalSettings.Mode);
+            if (portalLookup != null)
+            {
+                PortalAccountCache = MagPortalAccountCache.FromConnectionFile(portalLookup.ConnectionFile);
+                try { await PortalAccountCache.StartAsync(); }
+                catch { await PortalAccountCache.DisposeAsync(); PortalAccountCache = null; throw; }
+            }
+            PortalTickets = portalSettings.Mode == MagPortalTicketMode.Required
+                ? new MagPortalTicketPolicy(portalSettings, accounts: PortalAccountCache) : null;
             if (PortalTickets != null)
                 Logger.Info($"Portal tickets required: audience={PortalTickets.Settings.Audience} keys={string.Join(",", PortalTickets.Settings.Keys.Keys.OrderBy(id => id))}");
             PublishActiveAccounts();
@@ -541,7 +551,8 @@ namespace Server.Medius
             Plugins = new PluginsManager(Settings.PluginsPath);
 
             // 
-            await StartServerAsync();
+            try { await StartServerAsync(); }
+            finally { if (PortalAccountCache != null) await PortalAccountCache.DisposeAsync(); }
         }
 
         static void Initialize()

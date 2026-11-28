@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}Change your player name{% endblock %}
+{% block content %}
+<div class="panel narrow">
+<h1>Change your player name</h1>
+<p>Your current name is <strong>{{ current }}</strong>. Your characters, progress and linked launchers stay with your account.</p>
+<p>You may change your name once every 24 hours, including changes to capitalization. Your former names stay reserved for you and you may reclaim them after the cooldown. Submitting the identical spelling changes nothing.</p>
+<p>Restart MAG after changing your name. A game already running may continue showing your previous name until you restart.</p>
+{% if let Some(next) = next_change %}<p>Next change available: {{ next }}.</p>{% endif %}
+{% if let Some(e) = error %}<p class="alert">{{ e }}</p>{% endif %}
+<form method="post" action="/account/name" class="stack">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <input type="hidden" name="current" value="{{ current }}">
+  <label>New player name <input name="name" value="{{ value }}" minlength="3" maxlength="15" pattern="[A-Za-z][A-Za-z0-9_\-]{2,14}" autocomplete="off" required></label>
+  <p class="quiet">3 to 15 letters, digits, - or _, starting with a letter.</p>
+  <button>Change name</button>
+</form>
+<p><a href="/account">Back to your account</a></p>
+</div>
+{% endblock %}

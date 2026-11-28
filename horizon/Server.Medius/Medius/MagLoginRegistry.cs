@@ -13,6 +13,7 @@ namespace Server.Medius
         public int ApplicationId { get; internal set; }
         public uint AccountId { get; internal set; }
         public string AuthenticatedAccount { get; internal set; }
+        public string AuthenticatedPublicName { get; internal set; }
         public uint CharacterId { get; internal set; }
         public uint WorldId { get; internal set; }
         public string AccessToken { get; internal set; }
@@ -51,9 +52,10 @@ namespace Server.Medius
         private static string NewKey() => Convert.ToBase64String(RandomNumberGenerator.GetBytes(12)); // 16 ASCII chars, 96 random bits.
         // Compatibility tickets bind transports; mutation and gameplay require account provenance.
         public MagLoginTicket Issue(uint accountId, uint worldId, DateTime now) => IssueCore(null, accountId, worldId, now);
-        public MagLoginTicket IssueForAccount(string account, uint characterId, uint worldId, DateTime now) =>
-            MagDevelopmentAccountPolicy.ValidAccount(account) ? IssueCore(account, characterId, worldId, now) : null;
-        private MagLoginTicket IssueCore(string account, uint accountId, uint worldId, DateTime now)
+        public MagLoginTicket IssueForAccount(string account, uint characterId, uint worldId, DateTime now, string publicName = null) =>
+            MagDevelopmentAccountPolicy.ValidAccount(account) && (publicName == null || MagPublicIdentity.ValidName(publicName))
+                ? IssueCore(account, characterId, worldId, now, publicName) : null;
+        private MagLoginTicket IssueCore(string account, uint accountId, uint worldId, DateTime now, string publicName = null)
         {
             if (accountId == 0 || worldId != 1) return null;
             MagLoginTicket ticket;
@@ -61,7 +63,7 @@ namespace Server.Medius
             {
                 Purge(now); if (_tickets.Count >= _capacity) return null;
                 string token; do { token = NewKey(); } while (_tickets.ContainsKey(token));
-                ticket = new MagLoginTicket { ApplicationId = Program.Settings.MagApplicationId, AccountId = accountId, AuthenticatedAccount = account, CharacterId = accountId, WorldId = worldId, AccessToken = token,
+                ticket = new MagLoginTicket { ApplicationId = Program.Settings.MagApplicationId, AccountId = accountId, AuthenticatedAccount = account, AuthenticatedPublicName = publicName, CharacterId = accountId, WorldId = worldId, AccessToken = token,
                     SessionKey = NewKey(), Deadline = now.AddSeconds(60) };
                 _tickets.Add(token, ticket);
             }
@@ -103,6 +105,18 @@ namespace Server.Medius
             if (string.IsNullOrWhiteSpace(path) || !Path.IsPathFullyQualified(path)) throw new ArgumentException("Absolute marker path required.", nameof(path));
             lock (_markerGate) _markerPath = path;
             PublishMarker(now, true);
+        }
+        /// <summary>The unique authenticated public name of an owner's live bound credentials.
+        /// Pending tickets do not replace an active player's public identity.</summary>
+        public string PublicNameForOwner(string account, DateTime now)
+        {
+            lock (_gate)
+            {
+                Purge(now);
+                var names = _tickets.Values.Where(t => t.AuthenticatedAccount == account && t.AuthenticatedPublicName != null && t.ChannelId != null)
+                    .Select(t => t.AuthenticatedPublicName).Distinct(StringComparer.Ordinal).ToArray();
+                return names.Length == 1 ? names[0] : null;
+            }
         }
         /// <summary>True while a client holds a live, channel-bound lease for this account id (the
         /// id clients publish in presence and name in player-card queries).</summary>

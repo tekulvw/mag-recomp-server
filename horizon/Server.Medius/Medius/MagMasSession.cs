@@ -24,6 +24,7 @@ namespace Server.Medius
         public MagPortalTicketPolicy PortalTickets { get; set; }
         /// <summary>Portal account ID of a ticket-authenticated session; 0 otherwise.</summary>
         public uint PortalAccountId { get; private set; }
+        public string AuthenticatedPublicName { get; private set; }
         public string PortalTicketStatus { get; private set; } = "inactive";
         /// <summary>Staff log line when the last message refused a portal ticket; null otherwise.</summary>
         public string PortalTicketRefusal { get; private set; }
@@ -91,7 +92,7 @@ namespace Server.Medius
                             var refusal = MagPortalTicketPolicy.RefusalReply(request, outcome);
                             return refusal == null ? Array.Empty<RT_MSG_SERVER_PLUGIN_TO_APP>() : Reply(applicationId, refusal);
                         }
-                        AuthenticatedAccount = outcome.Account; PortalAccountId = outcome.AccountId;
+                        AuthenticatedAccount = outcome.Account; AuthenticatedPublicName = outcome.PublicName; PortalAccountId = outcome.AccountId;
                         State = SessionState.LocalDevelopmentAuthenticated;
                         return Reply(applicationId, request is MagRetailNpAuthenticateRequest
                             ? new MagRetailNpAuthenticateResponse { TransactionId = request.TransactionId, Success = true }
@@ -115,7 +116,7 @@ namespace Server.Medius
                             request.DnasSignature == string.Empty && MagDevelopmentAccountPolicy.HasZeroRsa(request) && CharacterStore != null)
                         {
                             foreach (var character in CharacterStore.ReadForAccount(AuthenticatedAccount))
-                                if (character.Name == request.AccountName) { ticket = LoginRegistry?.IssueForAccount(AuthenticatedAccount, character.Id, 1, now); if (ticket != null) _selectedCharacterId = character.Id; }
+                                if (character.Name == request.AccountName) { ticket = LoginRegistry?.IssueForAccount(AuthenticatedAccount, character.Id, 1, now, AuthenticatedPublicName); if (ticket != null) _selectedCharacterId = character.Id; }
                         }
                         StorageStatus = ticket == null ? "account-login-denied" : "account-login-ticket-issued";
                     }
@@ -157,7 +158,7 @@ namespace Server.Medius
                     try
                     {
                         if (CharacterStore == null) throw new IOException("Character store unavailable.");
-                        var outcome = CharacterStore.CreateForAccount(request, AuthenticatedAccount); result = outcome.Result; StorageStatus = outcome.Reason;
+                        var outcome = CharacterStore.CreateForAccount(request, AuthenticatedAccount, AuthenticatedPublicName ?? AuthenticatedAccount); result = outcome.Result; StorageStatus = outcome.Reason;
                         if (result == MagNetResult.Success) State = SessionState.CharacterCreated;
                     }
                     catch (Exception e) when (e is IOException || e is InvalidDataException || e is UnauthorizedAccessException)

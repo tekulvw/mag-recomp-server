@@ -17,7 +17,7 @@ namespace Server.Medius
     public enum MagPortalTicketReason
     {
         Accepted, Pending, Malformed, UnknownKey, BadSignature, BadLifetime, NotYetValid, Expired,
-        WrongAudience, BadIdentity, Replayed, ReplayCacheFull, BadChunk, BadHeader, TooManyAttempts, AccountSignedIn
+        WrongAudience, BadIdentity, Replayed, ReplayCacheFull, BadChunk, BadHeader, TooManyAttempts, AccountSignedIn, AccountUnavailable
     }
 
     public static class MagPortalTicketReasons
@@ -41,6 +41,7 @@ namespace Server.Medius
             MagPortalTicketReason.BadHeader => "bad_header",
             MagPortalTicketReason.TooManyAttempts => "too_many_attempts",
             MagPortalTicketReason.AccountSignedIn => "account_signed_in",
+            MagPortalTicketReason.AccountUnavailable => "account_unavailable",
             _ => "unknown"
         };
     }
@@ -133,7 +134,7 @@ namespace Server.Medius
         public uint AccountId { get; internal set; }
         public byte[] Nonce { get; internal set; }
         public string Audience { get; internal set; }
-        /// <summary>The name as the player chose it; accounts use its lowercase form.</summary>
+        /// <summary>The signed public name; optional numeric-ID lookup determines the immutable owner.</summary>
         public string PlayerName { get; internal set; }
     }
 
@@ -412,8 +413,9 @@ namespace Server.Medius
         public bool Accepted => Reason == MagPortalTicketReason.Accepted;
         /// <summary>True when the exchange ended without a sign-in (not accepted, not waiting for chunks).</summary>
         public bool Refused => Reason != MagPortalTicketReason.Accepted && Reason != MagPortalTicketReason.Pending;
-        /// <summary>Lowercase player name: the key of existing local characters.</summary>
+        /// <summary>Canonical immutable character owner; legacy mode uses the lowercase ticket name.</summary>
         public string Account { get; internal set; }
+        public string PublicName { get; internal set; }
         public uint AccountId { get; internal set; }
         /// <summary>
         /// For a refused ticket whose signature verified: its signed fields, for staff logs. Null when
@@ -453,16 +455,18 @@ namespace Server.Medius
     {
         public const int MaximumFailuresPerSession = 3;
         private readonly MagPortalTicketVerifier _verifier;
+        private readonly MagPortalAccountCache _accounts;
         private readonly Func<DateTime> _clock;
 
         public MagPortalTicketSettings Settings { get; }
         public MagPortalNonceCache Nonces { get; }
         public MagPortalLiveSessions Sessions { get; } = new MagPortalLiveSessions();
 
-        public MagPortalTicketPolicy(MagPortalTicketSettings settings, Func<DateTime> clock = null, MagPortalNonceCache nonces = null)
+        public MagPortalTicketPolicy(MagPortalTicketSettings settings, Func<DateTime> clock = null, MagPortalNonceCache nonces = null, MagPortalAccountCache accounts = null)
         {
             if (settings == null || settings.Mode != MagPortalTicketMode.Required) throw new ArgumentException("Portal ticket policy needs required mode.", nameof(settings));
             Settings = settings;
+            _accounts = accounts;
             _verifier = new MagPortalTicketVerifier(settings.Keys, settings.Audience);
             _clock = clock ?? (() => DateTime.UtcNow);
             Nonces = nonces ?? new MagPortalNonceCache();
@@ -492,7 +496,12 @@ namespace Server.Medius
             long now = UnixSeconds(_clock());
             reason = _verifier.Verify(bytes, now, out var ticket, out var signed);
             if (reason != MagPortalTicketReason.Accepted) return Fail(assembly, reason, true, signed, now);
-            string account = ticket.PlayerName.ToLowerInvariant();
+            string account;
+            if (_accounts != null)
+            {
+                if (!_accounts.TryResolve(ticket.AccountId, out account)) return Fail(assembly, MagPortalTicketReason.AccountUnavailable, true, ticket, now);
+            }
+            else account = ticket.PlayerName.ToLowerInvariant();
             // Claim first so a refused second session spends none of the ticket's uses.
             if (owner != null && !Sessions.TryClaim(account, owner, sessionNow)) return Fail(assembly, MagPortalTicketReason.AccountSignedIn, true, ticket, now);
             reason = Nonces.TryUse(ticket.Nonce, ticket.AccountId, ticket.ExpiresAt, now);
@@ -501,7 +510,7 @@ namespace Server.Medius
                 if (owner != null) Sessions.Release(owner);
                 return Fail(assembly, reason, true, ticket, now);
             }
-            return new MagPortalAuthentication { Reason = reason, Account = account, AccountId = ticket.AccountId, CheckedAt = now };
+            return new MagPortalAuthentication { Reason = reason, Account = account, PublicName = _accounts == null ? null : ticket.PlayerName, AccountId = ticket.AccountId, CheckedAt = now };
         }
 
         /// <summary>

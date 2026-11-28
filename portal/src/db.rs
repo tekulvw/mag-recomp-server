@@ -20,6 +20,9 @@ pub struct Account {
     pub subject: String,
     pub email: Option<String>,
     pub player_name: Option<String>,
+    /// Immutable character-storage owner; distinct from the public name after a rename.
+    pub game_account_name: Option<String>,
+    pub name_changed_at: Option<OffsetDateTime>,
     pub created_at: OffsetDateTime,
     pub banned_at: Option<OffsetDateTime>,
     pub ban_reason: Option<String>,
@@ -42,7 +45,7 @@ macro_rules! account_sql {
     ($head:literal, $tail:literal) => {
         concat!(
             $head,
-            " id, provider, subject, email, player_name, created_at, banned_at, ban_reason, kind ",
+            " id, provider, subject, email, player_name, game_account_name, name_changed_at, created_at, banned_at, ban_reason, kind ",
             $tail
         )
     };
@@ -95,6 +98,29 @@ pub async fn account_ids_by_name_keys(
         .await
 }
 
+pub async fn account_by_game_account_name(
+    pool: &PgPool,
+    owner: &str,
+) -> sqlx::Result<Option<Account>> {
+    sqlx::query_as(account_sql!(
+        "SELECT",
+        "FROM accounts WHERE game_account_name = $1"
+    ))
+    .bind(names::name_key(owner))
+    .fetch_optional(pool)
+    .await
+}
+
+pub async fn account_ids_by_game_account_names(
+    pool: &PgPool,
+    owners: &[String],
+) -> sqlx::Result<Vec<(String, i32)>> {
+    sqlx::query_as("SELECT game_account_name, id FROM accounts WHERE game_account_name = ANY($1)")
+        .bind(owners)
+        .fetch_all(pool)
+        .await
+}
+
 pub async fn accounts_by_email(pool: &PgPool, email: &str) -> sqlx::Result<Vec<Account>> {
     sqlx::query_as(account_sql!(
         "SELECT",
@@ -122,6 +148,11 @@ fn is_unique_violation(e: &sqlx::Error) -> bool {
 /// Without it, a claim could read "not reserved" while a deletion is about to reserve the
 /// name, then win the unique index once the deleted row is gone.
 pub async fn lock_name(conn: &mut PgConnection, name: &str) -> sqlx::Result<()> {
+    // Name changes are rare. One shared gate keeps account-row/name locking ordered
+    // across claim, rename, deletion and explicit recovery (including two-name changes).
+    sqlx::query("SELECT pg_advisory_xact_lock(5570746319637416268)")
+        .execute(&mut *conn)
+        .await?;
     sqlx::query("SELECT pg_advisory_xact_lock(hashtext('player-name:' || $1))")
         .bind(names::name_key(name))
         .execute(conn)
@@ -136,12 +167,36 @@ pub async fn claim_name(pool: &PgPool, account_id: i32, name: &str) -> sqlx::Res
     }
     let mut tx = pool.begin().await?;
     lock_name(&mut tx, name).await?;
+    if sqlx::query_scalar::<_, bool>("SELECT player_name IS NOT NULL FROM accounts WHERE id=$1")
+        .bind(account_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .unwrap_or(false)
+    {
+        return Ok(ClaimOutcome::AlreadyNamed);
+    }
+    let held: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM accounts WHERE lower(player_name)=$1)")
+            .bind(names::name_key(name))
+            .fetch_one(&mut *tx)
+            .await?;
+    if held {
+        return Ok(ClaimOutcome::Taken);
+    }
     let reserved: Option<(String,)> =
         sqlx::query_as("SELECT name_key FROM reserved_names WHERE name_key = $1")
             .bind(names::name_key(name))
             .fetch_optional(&mut *tx)
             .await?;
     if reserved.is_some() {
+        return Ok(ClaimOutcome::Reserved);
+    }
+    let owner_held: bool =
+        sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM accounts WHERE game_account_name=$1)")
+            .bind(names::name_key(name))
+            .fetch_one(&mut *tx)
+            .await?;
+    if owner_held {
         return Ok(ClaimOutcome::Reserved);
     }
     let result =
@@ -160,29 +215,128 @@ pub async fn claim_name(pool: &PgPool, account_id: i32, name: &str) -> sqlx::Res
     Ok(outcome)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenameOutcome {
+    Changed,
+    Unchanged,
+    Invalid,
+    Taken,
+    Reserved,
+    Cooldown(OffsetDateTime),
+    Stale,
+    Unavailable,
+}
+
+/// Changes only the public spelling. Every actual change, including case-only,
+/// starts a 24-hour cooldown; identical submissions do not extend it.
+pub async fn rename_name(
+    pool: &PgPool,
+    account_id: i32,
+    expected: &str,
+    name: &str,
+) -> sqlx::Result<RenameOutcome> {
+    if !names::valid_player_name(name) {
+        return Ok(RenameOutcome::Invalid);
+    }
+    let mut tx = pool.begin().await?;
+    lock_name(&mut tx, name).await?;
+    let row: Option<(String, String, Option<OffsetDateTime>, bool, String)> = sqlx::query_as(
+        "SELECT player_name, game_account_name, name_changed_at, banned_at IS NOT NULL, kind
+         FROM accounts WHERE id=$1 AND player_name IS NOT NULL FOR UPDATE",
+    )
+    .bind(account_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((old, owner, changed_at, banned, kind)) = row else {
+        return Ok(RenameOutcome::Unavailable);
+    };
+    if banned || kind != "person" {
+        return Ok(RenameOutcome::Unavailable);
+    }
+    if old == name {
+        return Ok(RenameOutcome::Unchanged);
+    }
+    if old != expected {
+        return Ok(RenameOutcome::Stale);
+    }
+    let now: OffsetDateTime = sqlx::query_scalar("SELECT clock_timestamp()")
+        .fetch_one(&mut *tx)
+        .await?;
+    if let Some(next) = changed_at.map(|at| at + Duration::hours(24))
+        && now < next
+    {
+        return Ok(RenameOutcome::Cooldown(next));
+    }
+    let key = names::name_key(name);
+    let held: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM accounts WHERE id<>$1 AND lower(player_name)=$2)",
+    )
+    .bind(account_id)
+    .bind(&key)
+    .fetch_one(&mut *tx)
+    .await?;
+    if held {
+        return Ok(RenameOutcome::Taken);
+    }
+    let protected: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM reserved_names WHERE name_key=$1 AND owner_account_id IS DISTINCT FROM $2)
+         OR EXISTS(SELECT 1 FROM accounts WHERE game_account_name=$1 AND id<>$2)")
+        .bind(&key).bind(account_id).fetch_one(&mut *tx).await?;
+    if protected {
+        return Ok(RenameOutcome::Reserved);
+    }
+    // Reserve both spellings, including case-only edits, to preserve the owner history.
+    for spelling in [old.as_str(), name] {
+        sqlx::query("INSERT INTO reserved_names(name_key,name,reason,owner_account_id,game_account_name,recovery_only)
+            VALUES($1,$2,'player name history',$3,$4,true)
+            ON CONFLICT(name_key) DO UPDATE SET owner_account_id=EXCLUDED.owner_account_id,
+                game_account_name=EXCLUDED.game_account_name,recovery_only=true")
+            .bind(names::name_key(spelling)).bind(spelling).bind(account_id).bind(&owner)
+            .execute(&mut *tx).await?;
+    }
+    sqlx::query("UPDATE accounts SET player_name=$2,name_changed_at=$3 WHERE id=$1")
+        .bind(account_id)
+        .bind(name)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    Ok(RenameOutcome::Changed)
+}
+
 /// Deletes the account, its sessions and devices, and keeps its name reserved so nobody
 /// else inherits the characters stored under it.
 pub async fn delete_account(pool: &PgPool, account_id: i32) -> sqlx::Result<bool> {
     let mut tx = pool.begin().await?;
-    let row: Option<(Option<String>,)> =
-        sqlx::query_as("SELECT player_name FROM accounts WHERE id = $1 FOR UPDATE")
-            .bind(account_id)
-            .fetch_optional(&mut *tx)
-            .await?;
-    let Some((name,)) = row else {
+    lock_name(&mut tx, "account-deletion").await?;
+    let row: Option<(Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT player_name, game_account_name FROM accounts WHERE id = $1 FOR UPDATE",
+    )
+    .bind(account_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    let Some((name, owner)) = row else {
         return Ok(false);
     };
     if let Some(name) = name {
         lock_name(&mut tx, &name).await?;
         sqlx::query(
-            "INSERT INTO reserved_names (name_key, name, reason) VALUES ($1, $2, $3)
+            "INSERT INTO reserved_names (name_key, name, reason, owner_account_id, game_account_name,recovery_only) VALUES ($1, $2, $3, $4, $5,true)
              ON CONFLICT (name_key) DO NOTHING",
         )
         .bind(names::name_key(&name))
         .bind(&name)
         .bind(format!("deleted account {account_id}"))
+        .bind(account_id)
+        .bind(owner.as_deref())
         .execute(&mut *tx)
         .await?;
+    }
+    if let Some(owner) = &owner {
+        sqlx::query("INSERT INTO reserved_names(name_key,name,reason,owner_account_id,game_account_name,recovery_only)
+            VALUES($1,$1,$2,$3,$1,true) ON CONFLICT(name_key) DO NOTHING")
+            .bind(owner).bind(format!("deleted account {account_id}")).bind(account_id)
+            .execute(&mut *tx).await?;
     }
     sqlx::query("DELETE FROM accounts WHERE id = $1")
         .bind(account_id)
@@ -583,7 +737,8 @@ pub async fn reserve_name(pool: &PgPool, name: &str, reason: &str) -> sqlx::Resu
 pub async fn release_name(pool: &PgPool, name: &str) -> sqlx::Result<bool> {
     let mut tx = pool.begin().await?;
     lock_name(&mut tx, name).await?;
-    let r = sqlx::query("DELETE FROM reserved_names WHERE name_key = $1")
+    let r = sqlx::query("DELETE FROM reserved_names r WHERE name_key = $1 AND owner_account_id IS NULL AND NOT recovery_only
+        AND NOT EXISTS(SELECT 1 FROM accounts a WHERE a.game_account_name=coalesce(r.game_account_name,r.name_key))")
         .bind(names::name_key(name))
         .execute(&mut *tx)
         .await?;
@@ -597,6 +752,8 @@ pub enum AssignOutcome {
     NotReserved,
     NoSuchAccount,
     AccountNamed,
+    /// A live account owns this historical name or its character-storage owner.
+    Owned,
 }
 
 /// Hands a reserved name to an account that has none yet.
@@ -607,14 +764,24 @@ pub async fn assign_reserved_name(
 ) -> sqlx::Result<AssignOutcome> {
     let mut tx = pool.begin().await?;
     lock_name(&mut tx, name).await?;
-    let reserved: Option<(String,)> =
-        sqlx::query_as("DELETE FROM reserved_names WHERE name_key = $1 RETURNING name")
+    let reserved: Option<(String, String, Option<i32>)> =
+        sqlx::query_as("SELECT name, coalesce(game_account_name,name_key), owner_account_id FROM reserved_names WHERE name_key = $1 FOR UPDATE")
             .bind(names::name_key(name))
             .fetch_optional(&mut *tx)
             .await?;
-    let Some((stored,)) = reserved else {
+    let Some((stored, owner, holder)) = reserved else {
         return Ok(AssignOutcome::NotReserved);
     };
+    if holder.is_some()
+        || sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM accounts WHERE game_account_name=$1)",
+        )
+        .bind(&owner)
+        .fetch_one(&mut *tx)
+        .await?
+    {
+        return Ok(AssignOutcome::Owned);
+    }
     let row: Option<(Option<String>,)> =
         sqlx::query_as("SELECT player_name FROM accounts WHERE id = $1 FOR UPDATE")
             .bind(account_id)
@@ -625,11 +792,18 @@ pub async fn assign_reserved_name(
         Some((Some(_),)) => return Ok(AssignOutcome::AccountNamed),
         Some((None,)) => {}
     }
-    sqlx::query("UPDATE accounts SET player_name = $2 WHERE id = $1")
-        .bind(account_id)
-        .bind(&stored)
+    sqlx::query("DELETE FROM reserved_names WHERE name_key=$1")
+        .bind(names::name_key(name))
         .execute(&mut *tx)
         .await?;
+    sqlx::query("UPDATE accounts SET player_name = $2, game_account_name=$3 WHERE id = $1")
+        .bind(account_id)
+        .bind(&stored)
+        .bind(&owner)
+        .execute(&mut *tx)
+        .await?;
+    sqlx::query("UPDATE reserved_names SET owner_account_id=$1 WHERE game_account_name=$2 AND owner_account_id IS NULL")
+        .bind(account_id).bind(&owner).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(AssignOutcome::Assigned)
 }
@@ -695,22 +869,38 @@ pub async fn create_service_account(
     if held.is_some() {
         return Ok(ServiceCreateOutcome::Taken);
     }
-    let reserved: Option<(String,)> =
-        sqlx::query_as("DELETE FROM reserved_names WHERE name_key = $1 RETURNING name")
+    let reserved: Option<(String, String, Option<i32>)> =
+        sqlx::query_as("SELECT name, coalesce(game_account_name,name_key), owner_account_id FROM reserved_names WHERE name_key = $1 FOR UPDATE")
             .bind(names::name_key(name))
             .fetch_optional(&mut *tx)
             .await?;
     let released = reserved.is_some();
-    let stored = reserved.map_or_else(|| name.to_owned(), |(n,)| n);
+    let (stored, owner, holder) =
+        reserved.unwrap_or_else(|| (name.to_owned(), names::name_key(name), None));
+    if holder.is_some()
+        || sqlx::query_scalar::<_, bool>(
+            "SELECT EXISTS(SELECT 1 FROM accounts WHERE game_account_name=$1)",
+        )
+        .bind(&owner)
+        .fetch_one(&mut *tx)
+        .await?
+    {
+        return Ok(ServiceCreateOutcome::Taken);
+    }
+    sqlx::query("DELETE FROM reserved_names WHERE name_key=$1")
+        .bind(names::name_key(name))
+        .execute(&mut *tx)
+        .await?;
     // A random subject under its own provider: no Google identity can ever upsert into it.
     let subject = format!("svc_{}", tokens::b64url(&tokens::random_bytes::<24>()));
     let result = sqlx::query_as(
-        "INSERT INTO accounts (provider, subject, player_name, kind) VALUES ($1, $2, $3, $1)
+        "INSERT INTO accounts (provider, subject, player_name, game_account_name, kind) VALUES ($1, $2, $3, $4, $1)
          RETURNING id",
     )
     .bind(SERVICE_KIND)
     .bind(&subject)
     .bind(&stored)
+    .bind(&owner)
     .fetch_one(&mut *tx)
     .await;
     let (account_id,): (i32,) = match result {
@@ -718,6 +908,8 @@ pub async fn create_service_account(
         Err(e) if is_unique_violation(&e) => return Ok(ServiceCreateOutcome::Taken),
         Err(e) => return Err(e),
     };
+    sqlx::query("UPDATE reserved_names SET owner_account_id=$1 WHERE game_account_name=$2 AND owner_account_id IS NULL")
+        .bind(account_id).bind(&owner).execute(&mut *tx).await?;
     tx.commit().await?;
     Ok(ServiceCreateOutcome::Created {
         account_id,
